@@ -1,0 +1,13 @@
+# Python 3.10 required —— 老的马里奥库不支持 3.12+，建议用 python@3.10 建 venv
+# ⚠️ numpy 必须 <2 —— nes-py / gym 跟 numpy 2.x 不兼容（会报 OverflowError）
+numpy<2
+
+gym-super-mario-bros==7.4.0
+nes-py==8.2.1
+gymnasium==1.2.3
+stable-baselines3==2.8.0
+sb3-contrib==2.8.0
+torch==2.12.0
+opencv-python
+imageio
+matplotlib

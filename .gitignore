@@ -1,0 +1,29 @@
+# --- Python ---
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# --- 训练产物：模型 / 检查点 / 蒸馏数据 / 内存映射（GB 级，不进 git）---
+*.zip
+checkpoints_*/
+checkpoints/
+distill_data/
+distill_data_*/
+*.npz
+*.dat
+*.pkl
+
+# --- 日志 ---
+*.log
+
+# --- 开发过程中的噪声 GIF（只保留通关展示用的几个）---
+ff22_death.gif
+ff22_lastframes.png
+mario_1-3_stuck.gif
+mario_ppo_smoke.gif
+mario_random.gif
+mario_v2_*.gif
+
+# macOS
+.DS_Store
