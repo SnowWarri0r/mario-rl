@@ -1,7 +1,8 @@
 # Mario RL — 一个网络通关《超级马里奥兄弟》多个世界
 
 用强化学习从零教 agent 玩 NES《超级马里奥兄弟》，从单关 PPO 起步，一路做到
-**单个神经网络连续通关三个世界共 12 关**。全程在一台 Mac 上跑（纯 CPU），
+**单个神经网络连续通关三个世界共 12 关**。专家训练、蒸馏、单世界 student 全在一台 Mac 上跑（纯 CPU），
+只有最后的十二关大合并撞到内存墙，搬去一台 GPU 机器（详见下面「内存墙」）。
 记录了每一步的实验、翻车和修复。
 
 基于 [`gym-super-mario-bros`](https://github.com/Kautenja/gym-super-mario-bros) 模拟器
@@ -14,11 +15,16 @@
 | World 1 (1-1 ~ 1-4) | 52% | `mario_world1.gif` |
 | World 2 (2-1 ~ 2-4) | 59% | `mario_world2.gif` |
 | World 3 (3-1 ~ 3-4) | 60% | `mario_world3.gif` |
-| World 1+2 八关合并（单网络） | 52% | `mario_all8.gif` |
+| World 1+2 八关合并（单网络） | 63% | `mario_all8.gif` |
+| **World 1+2+3 十二关合并（单网络）** | **73%** | `mario_all12.gif` |
 
-一个网络连续打通八关：
+十二关逐关（每关 100 局随机采样）：1-1 60% / 1-2 86% / 1-3 95% / 1-4 57% /
+2-1 76% / 2-2 70% / 2-3 76% / 2-4 71% / 3-1 73% / 3-2 79% / 3-3 78% / 3-4 54%——
+一关都不挂零，最差的 3-4 也有 54%。
 
-![八关全通](mario_all8.gif)
+一个网络连续打通十二关：
+
+![十二关全通](mario_all12.gif)
 
 最难啃的 2-2 水下关（一格宽的鱼缝 + 来回游的 Cheep-Cheep）：
 
@@ -54,8 +60,45 @@
 - **custom CNN 双重 /255 归一化 bug**：自带归一化的 features extractor + sb3 默认 `normalize_images=True`
   → 输入被除两次成 ~[0,0.004] → 激活塌缩、loss 卡死不降。修复：`policy_kwargs=dict(normalize_images=False)`。
 - **numpy 必须 <2**：nes-py / gym 跟 numpy 2.x 不兼容（`OverflowError`）。装 torch/sb3 时会被升回去，记得压回。
-- **内存墙**：把多个世界塞进一个网络时，蒸馏数据随关数线性涨（12 关 obs ≈ 25GB），
-  36GB 机器装不下 → swap 卡死。单世界 student（~4GB）毫无压力；全量大合并该上大内存机器。
+- **内存墙 → 换成显存**：把多个世界塞进一个网络时，蒸馏数据随关数线性涨（12 关 875k 帧 obs ≈ 25GB），
+  36GB 机器装不下 → 压缩内存把随机访问拖慢 25 倍（~29min/epoch），磁盘 memmap 也救不了
+  （25GB 远超 page cache，每 epoch 全 miss，从内存 bound 变磁盘 bound）。
+  搬到一张 96GB 显存的卡上，**整份 obs 直接常驻显存**，每个 batch 就是一次显存内 gather，
+  零 host→device 拷贝 → **9.3s/epoch（94k 帧/s），快约 180 倍**，60 epoch 十分钟跑完。
+  蒸馏本来就是"数据全程只读、随机取 batch"，这种负载最适合整份塞进显存，而不是想办法在内存里省。
+- **模型跨 numpy 大版本不通**：sb3 存的 zip 里 pickle 了 numpy 的内部布局，numpy 2.x 存的模型在
+  numpy 1.x 里 load 直接 `ModuleNotFoundError: numpy._core.numeric`。而模拟器这条链路被 nes-py 钉死在
+  numpy<2 → 蒸馏也必须在 numpy<2 的环境里做，别为了图快借一个 numpy 2 的环境训（训完发现评测加载不了）。
+  更阴的是这个错误在多进程评测里表现为 **worker 全部静默消失、主进程永远等**——`mp.Pool` 检测不到
+  worker 被硬杀，换 `ProcessPoolExecutor`（会抛 `BrokenProcessPool`）才看得见。
+- **一个 bug 值多少，取决于在哪个设定里量**：同一个双重归一化 bug，在八关那个原始配方里吃掉 9.3pp，
+  在数据更多、训得更久的十二关配方里只吃掉 2.9pp（网络能部分补偿被压到 ~[0,0.004] 的输入）。
+  第一次我在后者量，得出"这 bug 不是主因"的结论——读反了。见下面「消融」。
+
+## 消融：十二关合并（74%）比八关合并（63%）强在哪
+
+三个变量：修不修双重归一化 bug / 30 还是 60 epoch / 喂八关(730k)还是十二关(875k)数据。
+每次只动一个，每关 100 局随机采样（"八关均"= 那 800 局的合并通关率，±1SE≈1.7pp）。
+一个 epoch 9 秒，六组训练 + 7200 局评测一小时内跑完——**便宜到没有理由靠猜**。
+
+| 实验 | 数据 | epoch | 输入 | 八关均 | 十二关均 |
+|---|---|---|---|---|---|
+| ① 八关合并原配方 | 730k | 30 | 双重 /255 | **62.7%** | 41.8% |
+| ② | 875k | 60 | 双重 /255 | 71.0% | 69.5% |
+| ③ 十二关合并成果 | 875k | 60 | 正常 | **73.9%** | **72.9%** |
+| ④ | 875k | 30 | 正常 | 72.0% | 71.4% |
+| ⑤ | 730k | 60 | 正常 | 71.4% | 47.6% |
+| ⑥ = ① 只修 bug | 730k | 30 | 正常 | **72.0%** | 48.0% |
+
+- **修 bug：+9.3pp**（①→⑥，同数据同 epoch，>3σ）。八关合并那次低分的主因。
+- **epoch 30→60：≈0**（⑥→⑤ −0.6pp，④→③ +1.9pp，都在噪声内）。686 万参的 WideCNN 在
+  30 epoch 已经收够了，"大网络要多训"这条在这儿不成立。
+- **加 World 3 数据：0 ~ +2.5pp**（60ep 时 ⑤→③ +2.5，30ep 时 ⑥→④ 0.0）。对老八关基本中性，
+  但**新的四关是白送的**（③ 的 W3：73/79/78/54）。
+- 所以「关越多容量越紧张」不成立：十二关在老八关上不输八关，还白拿四关。
+  2-2 水关 38%（①）→57%（⑥）→70%（③），它当年被"挤掉"主要是输入残废，不是容量。
+- **每关 30 局不够分辨这几 pp**：N=30 时某一关能在 57% 和 83% 之间跳（跨过 2σ），
+  先用它挑方向，下结论前把样本量提到 100。
 
 ## 环境搭建
 
@@ -82,10 +125,19 @@ python collect_distill_w2.py            # 收老师数据
 python distill_w2_wide.py 35 cpu        # 蒸 WideCNN 学生
 python collect_dagger_w2.py             # DAgger 收漂移数据 → 重蒸
 
+# 十二关大合并（GPU 机器上跑：整份 obs 进显存，需要 ~25GB 显存）
+python distill_all12_gpu.py 60 mario_all12_wide 512
+MARIO_DOUBLE_NORM=1 python distill_all12_gpu.py 60 mario_all12_dblnorm 512   # 双重归一化消融
+
 # 评测 / 录像
-python eval_stages.py                    # 逐关通关率
-python record_world2_montage.py mario_w2_wide.zip   # 录通关 GIF
+python eval_stages.py                    # 逐关通关率（World 1）
+python eval_all12.py mario_all12_wide.zip 30 48      # 十二关逐关，多进程并行
+python record_world2_montage.py mario_w2_wide.zip    # 录通关 GIF
+python record_all12_montage.py mario_all12_wide.zip mario_all12.gif   # 十二关 montage（12 关并行录）
 ```
+
+> 表里两行都是这次用同一套评测（每关 100 局）重测的：八关合并 63%（当年记的 52% 是每关 20 局的结果）。
+> 通关率在 N=20/30 这个量级单关能抖 ±8pp，跨实验比数字前先对齐样本量。
 
 ## 文件导览
 
@@ -95,7 +147,8 @@ python record_world2_montage.py mario_w2_wide.zip   # 录通关 GIF
 | 网络 | `wide_cnn.py`（加宽 NatureCNN）、`impala_cnn.py`（残差版，RL 里训不动的反面教材） |
 | 专家训练 | `train_world{1,2,3}*.py`、`train_{1_3,2_1,2_2,3_1}_expert*.py`、`train_2_2_ladder.py`（梯子塑形） |
 | 蒸馏 | `collect_distill_*.py`、`distill_*_student.py`、`distill_*_wide.py`、`collect_dagger_*.py` |
-| 合并 | `distill_all8_wide.py`（八关）、`distill_all12_*.py`（十二关，含内存优化版） |
-| 评测/录像 | `eval_stages.py`、`eval_lstm22.py`、`record_*_montage.py`、`record_gif.py`、`plot_progress.py` |
+| 合并 | `distill_all8_wide.py`（八关）、`distill_all12_gpu.py`（十二关，obs 全进显存）、`distill_all12_{wide,mmap}.py`（十二关的抽样版 / 磁盘 memmap 版，Mac 上的两次挣扎） |
+| 评测/录像 | `eval_stages.py`、`eval_all12.py`（十二关并行）、`eval_lstm22.py`、`record_*_montage.py`、`record_gif.py`、`plot_progress.py` |
+| 杂项 | `stub_env.py`（空壳 env：蒸馏只需要 obs/action 的形状，用它就不必装 NES 模拟器） |
 
 > 训练产物（模型 `.zip`、检查点、蒸馏数据 `.npz`）体积太大没进仓，按上面的脚本可自行复现。
