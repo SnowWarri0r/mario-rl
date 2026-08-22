@@ -46,7 +46,8 @@ if RESUME:
 else:
     student = PPO("CnnPolicy", dummy, device=DEVICE, n_steps=64, verbose=0,
                   policy_kwargs=dict(features_extractor_class=WideNatureCNN,
-                                     features_extractor_kwargs=dict(features_dim=1024)))
+                                     features_extractor_kwargs=dict(features_dim=1024),
+                                     normalize_images=False))  # WideNatureCNN 自己 /255，关掉 sb3 的二次归一化
 opt = th.optim.Adam(student.policy.parameters(), lr=2.5e-4)
 probs_t = th.as_tensor(prob_all, device=DEVICE)
 for ep in range(EPOCHS):
