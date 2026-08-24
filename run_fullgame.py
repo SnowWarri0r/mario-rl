@@ -9,7 +9,8 @@
          三条命瞬间打完。所以它只适合"从不出错"的关。
   sto    全程采样。抗错但每关都有翻车概率。
   hybrid 默认 argmax；某条命死掉后，本次重试改成采样（换条路），过关后切回 argmax。
-         这是把两者的长处凑一起的实战打法。
+  auto   按 DET_STAGES 表逐关选模式（实测哪种好用哪种），死了同样退回采样重试。
+         DET/STO 的优劣是逐关分裂的，全局二选一会在一半关卡上吃亏。
 
 用法: python run_fullgame.py <model.zip> [det|sto|hybrid] [并行局数] [步数上限]
 """
@@ -23,6 +24,10 @@ MODEL = sys.argv[1] if len(sys.argv) > 1 else "mario_all12_wide.zip"
 MODE = sys.argv[2] if len(sys.argv) > 2 else "hybrid"
 RUNS = int(sys.argv[3]) if len(sys.argv) > 3 else 24
 MAX_STEPS = int(sys.argv[4]) if len(sys.argv) > 4 else 30000
+
+# mode=auto 用的逐关推理模式表：DET/STO 的优劣是逐关分裂的（实测 mario_honest12 @noop=30：
+# 1-4 DET 100% vs STO 55%，而 1-2 DET 9% vs STO 55%）。哪种好按实测挑，别全局二选一。
+DET_STAGES = {"1-4", "2-1", "2-2", "2-4", "3-1", "3-2", "3-3", "3-4"}
 
 
 def play(run_id):
@@ -44,7 +49,12 @@ def play(run_id):
     by_status = {}
     cur = ("1-1", "small")                                           # 当前这次尝试：(关卡, 进关形态)
     by_status[cur] = [1, 0]
-    ws, life, sto_now = (1, 1), None, (MODE == "sto")
+    def want_sto(w, s):
+        if MODE == "auto":
+            return f"{w}-{s}" not in DET_STAGES      # 表里的关用 argmax，其余采样
+        return MODE == "sto"
+
+    ws, life, sto_now = (1, 1), None, want_sto(1, 1)
     steps, prev_x, prev_time = 0, 0, None
     while steps < MAX_STEPS:
         a, _ = model.predict(o, deterministic=not sto_now)
@@ -60,7 +70,7 @@ def play(run_id):
             visited.setdefault(f"{ws[0]}-{ws[1]}", [1, 0, 0])[2] += 1
             cur = (f"{ws[0]}-{ws[1]}", "small")                      # 复活一律小马里奥，算新的一次尝试
             by_status.setdefault(cur, [0, 0])[0] += 1
-            if MODE == "hybrid":
+            if MODE in ("hybrid", "auto"):
                 sto_now = True                                       # 这条命改采样，别再撞同一面墙
         life = lf
         if (w, s) != ws:                                             # 过关，接下一关
@@ -72,8 +82,8 @@ def play(run_id):
             cur = (f"{w}-{s}", info.get("status", "small"))          # 新关卡的这次尝试
             by_status.setdefault(cur, [0, 0])[0] += 1
             ws = (w, s)
-            if MODE == "hybrid":
-                sto_now = False                                      # 新关卡切回 argmax
+            if MODE in ("hybrid", "auto"):
+                sto_now = want_sto(w, s)                             # 新关卡按表选模式
         prev_x, prev_time = info.get("x_pos", prev_x), info.get("time")
         if term or trunc:                                            # is_game_over
             break
