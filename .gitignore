@@ -10,6 +10,7 @@ checkpoints_*/
 checkpoints/
 distill_data/
 distill_data_*/
+checkpoints_*/
 *.npz
 *.dat
 *.pkl
