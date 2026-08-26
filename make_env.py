@@ -24,6 +24,9 @@ NOOP_JITTER = int(os.environ.get("MARIO_NOOP", "0"))
 # 每个动作硬按 4 帧可能物理上就不够细——改 2 让它能更快连点划水。
 # 注意：训练和评测必须用同一个值，动作粒度变了策略就不通用。
 SKIP_FRAMES = int(os.environ.get("MARIO_SKIP", "4"))
+# MARIO_STACK=k：叠几帧（默认 4）。叠更多＝能看到更长一段的敌人运动轨迹，
+# 对 2-2 这种"来回游的鱼"也许有用。注意改了它模型就不通用（输入通道数变了，要从零训）。
+STACK_FRAMES = int(os.environ.get("MARIO_STACK", "4"))
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -136,9 +139,9 @@ class GrayResize(gym.ObservationWrapper):
 # --- 积木 D：叠帧。把最近 4 张摞成 (4,84,84) ---
 # 单张静止图看不出马里奥在往哪动、速度多快。摞 4 张连续帧，agent 就能'看出运动'。
 class FrameStack(gym.Wrapper):
-    def __init__(self, env, n=4, flush_on_stage_change=None):
+    def __init__(self, env, n=None, flush_on_stage_change=None):
         super().__init__(env)
-        self.n = n
+        self.n = n = STACK_FRAMES if n is None else n
         self.frames = collections.deque(maxlen=n)
         self.observation_space = spaces.Box(0, 255, (n, 84, 84), np.uint8)
         self.flush = FLUSH_ON_STAGE_CHANGE if flush_on_stage_change is None else flush_on_stage_change
@@ -177,7 +180,7 @@ def make_env(stages=None, skip=None, crop=None, noop=None):
     if CROP_HUD if crop is None else crop:
         env = CropHUD(env)
     env = GrayResize(env, size=84)
-    env = FrameStack(env, n=4)
+    env = FrameStack(env)
     return env
 
 
@@ -266,7 +269,7 @@ def make_env_stage22_shaped():
     e = ShapeReward(e)
     e = SkipFrame(e, k=4)
     e = GrayResize(e, 84)
-    e = FrameStack(e, 4)
+    e = FrameStack(e)
     return e
 
 
@@ -277,7 +280,7 @@ def make_env_stage22_ckpt():
     e = ShapeReward(e, checkpoints=[(2100.0, 60.0)])
     e = SkipFrame(e, k=4)
     e = GrayResize(e, 84)
-    e = FrameStack(e, 4)
+    e = FrameStack(e)
     return e
 
 
@@ -289,7 +292,7 @@ def make_env_stage22_ladder():
                                     (2700.0, 50.0), (2900.0, 50.0)])
     e = SkipFrame(e, k=4)
     e = GrayResize(e, 84)
-    e = FrameStack(e, 4)
+    e = FrameStack(e)
     return e
 
 
@@ -300,12 +303,12 @@ def make_env_stage22_ladder():
 def make_env_stage22_ladder_noop():
     # 抖动量取 MARIO_NOOP（默认 30）。课程式训练就是逐级把它从 4 抬到 30。
     e = MarioBase(stages=["2-2"])
-    e = NoopReset(e, max_noop=NOOP_JITTER or 30)
+    e = NoopReset(e, max_noop=NOOP_JITTER)   # 0 就是不抖(别写 `or 30`，会把 0 悄悄变成 30)
     e = ShapeReward(e, checkpoints=[(2100.0, 50.0), (2400.0, 50.0),
                                     (2700.0, 50.0), (2900.0, 50.0)])
     e = SkipFrame(e, k=SKIP_FRAMES)
     e = GrayResize(e, 84)
-    e = FrameStack(e, 4)
+    e = FrameStack(e)
     return e
 
 
@@ -318,3 +321,82 @@ if __name__ == "__main__":
     o, r, term, trunc, info = env.step(env.action_space.sample())
     print("step obs shape :", o.shape, "| reward:", r, "| mario x:", info.get("x_pos"))
     print("ENV OK")
+
+
+# --- Go-Explore / Backplay 那套：直接把 agent 放到硬点前面反复练 ---
+# 梯子塑形是用奖励"拽"策略过去，这个是直接从存档点开局，省掉每回合先游 2000 像素的成本。
+# 模拟器状态存取藏在 6 层 wrapper 底下（JoypadSpace → TimeLimit → OrderEnforcing →
+# PassiveEnvChecker → EnvCompatibility → RandomStages → SuperMarioBrosEnv 才有 _backup）。
+# 单槽存档：所以做法是"重放一段动作前缀 → _backup() → 之后每次 reset 都 _restore()"，
+# 重放成本（~0.9s）摊到 ROTATE 个回合上。前缀本身带不同相位，档案自带多样性。
+def _find_nes(env):
+    """穿过所有 wrapper 找到带 _backup 的 SuperMarioBrosEnv。
+    注意 MarioBase 是 gym.Env 不是 Wrapper，它把底层环境放在 `_e` 上，只顺着 `.env` 钻会一步都下不去。"""
+    node = env
+    for _ in range(12):
+        if hasattr(node, "_backup"):
+            return node
+        nxt = getattr(node, "env", None)
+        if nxt is None:
+            nxt = getattr(node, "_e", None)
+        if nxt is None or nxt is node:
+            break
+        node = nxt
+    raise RuntimeError("找不到能存档的 NES 环境层")
+
+
+class ArchiveStart(gym.Wrapper):
+    """开局就站在硬点前：重放一段动作前缀到目标位置，然后 _backup()。
+
+    关键机制：nes_py 的 reset() 是 `if self._has_backup: self._restore()`——所以覆盖掉备份之后，
+    每次正常 reset 都会落到我们的快照上，整条 wrapper 链（TimeLimit / OrderEnforcing / ShapeReward /
+    FrameStack）都照常重置。不要自己绕过 reset 去 _restore，那样内层 wrapper 的回合状态不会清，
+    会把 worker 搞崩（踩过：EOFError）。
+    单槽存档意味着一个 env 只能守一个起点，所以"完整关卡"的回合靠**另一批环境**提供，不在回合间横跳。
+    """
+
+    def __init__(self, env, prefixes, seed=None):
+        super().__init__(env)
+        self.prefixes = prefixes
+        self.rng = np.random.default_rng(seed)
+        self._snapped = False
+
+    def reset(self, **kw):
+        if self._snapped:
+            return self.env.reset(**kw)          # 自动恢复到快照
+        for _ in range(8):                       # 前缀可能因相位不同走死，多试几条
+            o, info = self.env.reset(**kw)
+            pre = self.prefixes[int(self.rng.integers(len(self.prefixes)))]
+            ok = True
+            # 前缀录于 skip=4 的环境（每动作维持 4 帧），这里在 MarioBase 层重放要重复 SKIP_FRAMES 次，
+            # 否则只走到目标距离的 1/4（踩过：x=484 vs 1850）
+            for a in pre:
+                for _ in range(SKIP_FRAMES):
+                    o, r, term, trunc, info = self.env.step(int(a))
+                    if term or trunc:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                _find_nes(self.env)._backup()
+                self._snapped = True
+                return o, info
+        return self.env.reset(**kw)              # 都失败就老老实实从头开始
+
+
+def make_env_stage22_archive():
+    """2-2 · 存档起点 + 梯子塑形：MARIO_ARCHIVE 指向前缀文件，MARIO_ARCHIVE_P 控制存档开局的比例。"""
+    path = os.environ.get("MARIO_ARCHIVE", "states22_prefixes.npz")
+    p = float(os.environ.get("MARIO_ARCHIVE_P", "0.75"))
+    e = MarioBase(stages=["2-2"])
+    # 按环境切分：这一份 env 以概率 p 成为"硬点开局"环境，其余保持完整关卡，
+    # 让策略不会只会打后半段（单槽存档没法在回合间来回切）。
+    if np.random.default_rng().random() < p:
+        e = ArchiveStart(e, list(np.load(path, allow_pickle=True)["prefixes"]))
+    e = ShapeReward(e, checkpoints=[(2100.0, 50.0), (2400.0, 50.0),
+                                    (2700.0, 50.0), (2900.0, 50.0)])
+    e = SkipFrame(e, k=SKIP_FRAMES)
+    e = GrayResize(e, 84)
+    e = FrameStack(e)
+    return e
