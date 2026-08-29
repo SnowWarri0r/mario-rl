@@ -16,15 +16,24 @@ import numpy as np
 PER_STAGE = int(sys.argv[1]) if len(sys.argv) > 1 else 70_000
 SHARDS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 NOOP = int(sys.argv[3]) if len(sys.argv) > 3 else 30
-OUTDIR = "distill_data_noop"
+OUTDIR = "distill_data_noop2"
 
+# 逐关挑抖动下实测最强的那个老师（N=200 @ noop=30）。抖动重训不是全面胜利：
+# W3 大胜（3-4 44→78、3-1 3→64）、W1 半胜（1-3 0→59、1-1 50→73，但 1-2 49→17）、
+# W2 反而变差（2-3 84→75、2-4 69→64）——一刀切全换会把好老师换掉，得一关一关挑。
 TEACHERS = {
-    "1-1": "mario_w1c_final.zip", "1-2": "mario_w1c_final.zip",
-    "1-3": "mario_13expert_final.zip", "1-4": "mario_w1c_final.zip",
-    "2-1": "mario_21expert_v2.zip", "2-2": "mario_22noop_gpu.zip",   # 2-2 换成抖动下重训过的那个
-    "2-3": "mario_w2land_final.zip", "2-4": "mario_w2land_final.zip",
-    "3-1": "checkpoints_31expert/mario_31exp_1600000_steps.zip",
-    "3-2": "mario_w3_final.zip", "3-3": "mario_w3_final.zip", "3-4": "mario_w3_final.zip",
+    "1-1": "mario_w1noop.zip",          # 73%（原版 50）
+    "1-2": "mario_w1c_final.zip",       # 49%（重训版只有 17）
+    "1-3": "mario_w1noop.zip",          # 59%（原版 0）
+    "1-4": "mario_w1c_final.zip",       # 63%（重训版 62，打平取原版）
+    "2-1": "mario_21expert_v2.zip",     # 46%（重训版 32、w2land 0）
+    "2-2": "mario_22cur_30.zip",        # 26% STO / 36% DET，课程那次撞出来的尖解
+    "2-3": "mario_w2land_final.zip",    # 84%（重训版 75）
+    "2-4": "mario_w2land_final.zip",    # 69%（重训版 64）
+    "3-1": "mario_w3noop.zip",          # 64%（原版 3）
+    "3-2": "mario_w3noop.zip",          # 82%（原版 77）
+    "3-3": "mario_w3noop.zip",          # 83%（原版 78）
+    "3-4": "mario_w3noop.zip",          # 78%（原版 44）
 }
 
 
