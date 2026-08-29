@@ -15,7 +15,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
 from make_env import (make_env_world1, make_env_world2_land, make_env_world3,
                       make_env_stage21, make_env_stage13, make_env_stage12,
-                      make_env_stage23, NOOP_JITTER)
+                      make_env_stage23, make_env_single, NOOP_JITTER)
 
 DEVICE = os.environ.get("MARIO_DEVICE", "cpu")
 OUT = os.environ.get("MARIO_OUT", "mario_w1noop")
@@ -37,7 +37,8 @@ def main():
     factory = {"w1": make_env_world1, "w2": make_env_world2_land, "w3": make_env_world3,
                "s21": make_env_stage21, "s13": make_env_stage13,
                "s12": make_env_stage12,
-               "s23": make_env_stage23}[world]
+               "s23": make_env_stage23,
+               "single": make_env_single}[world]   # single 配 MARIO_STAGE=2-4
     assert NOOP_JITTER, "这个脚本的意义就在抖动，记得 MARIO_NOOP=30"
     venv = make_vec_env(factory, n_envs=n_envs, vec_env_cls=SubprocVecEnv)
     if os.path.exists(BASE_VECN):
