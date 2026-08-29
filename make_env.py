@@ -1,10 +1,29 @@
 """马里奥环境 + 预处理。每个 wrapper 是一个'积木'，决定 agent 看到什么。"""
 import warnings; warnings.filterwarnings("ignore")
 import collections
+import os
 import numpy as np
 import cv2
 import gymnasium as gym
 from gymnasium import spaces
+
+# 顶部状态栏（MARIO / 分数 / 硬币 / WORLD / TIME）占画面前 40 行，实测裁掉它播放区完整保留。
+# 为什么要裁：状态栏进了观测，"打到第 5 关时的 1-2"和"单独打 1-2"在像素上就是两张不同的图
+# （分数不同），确定性策略的轨迹跨不过关卡——完整游戏里平均只连过 2.5 关，逐关却有 73%。
+# MARIO_CROP=1 全局打开，评测/录像脚本不用改代码。
+HUD_ROWS = 40
+CROP_HUD = os.environ.get("MARIO_CROP") == "1"
+# MARIO_FLUSH=1：过关瞬间把叠帧缓冲清空重填。策略只在"4 帧同属一关"的输入上训过，
+# 关卡交界处那几步的输入是"3 帧上一关 + 1 帧新关"，属于训练里没有的分布。
+FLUSH_ON_STAGE_CHANGE = os.environ.get("MARIO_FLUSH") == "1"
+# MARIO_NOOP=k：每次 reset 后先随机空按 0~k 帧，把敌人/移动平台的相位推开（Atari 那套 no-op starts）。
+# 为什么必须有：不加它，每局都从"游戏刚启动"的同一状态开始，相位固定，策略能靠背一段舞步拿分——
+# 实测 2-2 无抖动 64%、抖 0-60 帧后 0/50，那 64% 全是记死的轨迹。训练和评测都要开，否则分数是假的。
+NOOP_JITTER = int(os.environ.get("MARIO_NOOP", "0"))
+# MARIO_SKIP=k：一个动作连按几帧（默认 4）。2-2 那道一格宽的鱼缝要帧级精度，
+# 每个动作硬按 4 帧可能物理上就不够细——改 2 让它能更快连点划水。
+# 注意：训练和评测必须用同一个值，动作粒度变了策略就不通用。
+SKIP_FRAMES = int(os.environ.get("MARIO_SKIP", "4"))
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -70,6 +89,37 @@ class SkipFrame(gym.Wrapper):
         return o, total, term, trunc, info
 
 
+# --- 积木 A2：no-op starts。reset 后随机空按几帧，只改相位不改别的 ---
+class NoopReset(gym.Wrapper):
+    def __init__(self, env, max_noop=None, seed=None):
+        super().__init__(env)
+        self.max_noop = NOOP_JITTER if max_noop is None else max_noop
+        self.rng = np.random.default_rng(seed)
+
+    def reset(self, **kw):
+        o, info = self.env.reset(**kw)
+        for _ in range(int(self.rng.integers(0, self.max_noop + 1)) if self.max_noop else 0):
+            o, r, term, trunc, info = self.env.step(0)
+            if term or trunc:                                # 极少见：空按到死，重开一次就好
+                o, info = self.env.reset(**kw)
+                break
+        return o, info
+
+
+# --- 积木 B2：裁掉顶部状态栏（可选）---
+# 分数/命数/时间这些数字对"怎么跳过这个坑"毫无用处，但它们会随游戏进度变化，
+# 等于给同一个场景配了个会变的水印，让策略学到的轨迹依赖当前分数。裁掉＝去掉这个干扰源。
+class CropHUD(gym.ObservationWrapper):
+    def __init__(self, env, top=HUD_ROWS):
+        super().__init__(env)
+        self.top = top
+        h, w, c = env.observation_space.shape
+        self.observation_space = spaces.Box(0, 255, (h - top, w, c), np.uint8)
+
+    def observation(self, obs):
+        return obs[self.top:]
+
+
 # --- 积木 C：转灰度 + 缩小到 84x84 ---
 # 彩色 240x256 对 CNN 太重，颜色对'往右冲'也没用。压成灰度小图，信息够用、算得快。
 class GrayResize(gym.ObservationWrapper):
@@ -86,30 +136,46 @@ class GrayResize(gym.ObservationWrapper):
 # --- 积木 D：叠帧。把最近 4 张摞成 (4,84,84) ---
 # 单张静止图看不出马里奥在往哪动、速度多快。摞 4 张连续帧，agent 就能'看出运动'。
 class FrameStack(gym.Wrapper):
-    def __init__(self, env, n=4):
+    def __init__(self, env, n=4, flush_on_stage_change=None):
         super().__init__(env)
         self.n = n
         self.frames = collections.deque(maxlen=n)
         self.observation_space = spaces.Box(0, 255, (n, 84, 84), np.uint8)
+        self.flush = FLUSH_ON_STAGE_CHANGE if flush_on_stage_change is None else flush_on_stage_change
+        self._ws = None
 
     def reset(self, **kw):
         o, info = self.env.reset(**kw)
         for _ in range(self.n):
             self.frames.append(o)
+        self._ws = None
         return np.stack(self.frames, 0), info
 
     def step(self, a):
         o, r, term, trunc, info = self.env.step(a)
         self.frames.append(o)
+        if self.flush:
+            ws = (info.get("world"), info.get("stage"))
+            if self._ws is not None and ws != self._ws:      # 刚进新关卡 → 4 帧全填新画面
+                for _ in range(self.n):
+                    self.frames.append(o)
+            self._ws = ws
         return np.stack(self.frames, 0), r, term, trunc, info
 
 
-def make_env(stages=None, skip=4):
-    """把 4 块积木叠起来：原始画面 -> 跳帧 -> 灰度缩小 -> 叠4帧。最终 agent 看到 (4,84,84)。
+def make_env(stages=None, skip=None, crop=None, noop=None):
+    """把积木叠起来：原始画面 -> 跳帧 ->（裁状态栏）-> 灰度缩小 -> 叠4帧。agent 看到 (4,84,84)。
     stages=None → 单一/完整游戏；stages=['1-1',...] → 随机选关混合训练。
-    skip=跳帧数（陆地 4；水下可调 2 拿更精细的连点控制）。"""
+    skip=跳帧数（默认跟随 MARIO_SKIP，陆地 4；水下可调 2 拿更精细的连点控制）。
+    crop=是否裁顶部状态栏（默认跟随环境变量 MARIO_CROP；裁与不裁的模型不通用，得配对使用）。
+    noop=开局随机空按 0~noop 个模拟器帧（默认跟随 MARIO_NOOP）。抖相位用，防止策略背轨迹。"""
     env = MarioBase(stages=stages)
-    env = SkipFrame(env, k=skip)
+    k = NOOP_JITTER if noop is None else noop
+    if k:
+        env = NoopReset(env, max_noop=k)     # 单帧粒度地抖相位，要放在跳帧之前
+    env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
+    if CROP_HUD if crop is None else crop:
+        env = CropHUD(env)
     env = GrayResize(env, size=84)
     env = FrameStack(env, n=4)
     return env
@@ -222,6 +288,22 @@ def make_env_stage22_ladder():
     e = ShapeReward(e, checkpoints=[(2100.0, 50.0), (2400.0, 50.0),
                                     (2700.0, 50.0), (2900.0, 50.0)])
     e = SkipFrame(e, k=4)
+    e = GrayResize(e, 84)
+    e = FrameStack(e, 4)
+    return e
+
+
+# 2-2 · 梯子 + no-op starts：每局开局随机空按 0-30 帧，把鱼的相位推开。
+# 不加这个，2-2 的"70% 通关"是一段跟鱼帧级锁死的舞步——抖 2 帧就腰斩、抖 30 帧只剩 4%。
+# 加了它，策略再也背不了固定序列，只能真的看着鱼做决定。NoopReset 放在 ShapeReward 之前，
+# 空按的那几帧不该产生奖励也不该算进 checkpoint 判定。
+def make_env_stage22_ladder_noop():
+    # 抖动量取 MARIO_NOOP（默认 30）。课程式训练就是逐级把它从 4 抬到 30。
+    e = MarioBase(stages=["2-2"])
+    e = NoopReset(e, max_noop=NOOP_JITTER or 30)
+    e = ShapeReward(e, checkpoints=[(2100.0, 50.0), (2400.0, 50.0),
+                                    (2700.0, 50.0), (2900.0, 50.0)])
+    e = SkipFrame(e, k=SKIP_FRAMES)
     e = GrayResize(e, 84)
     e = FrameStack(e, 4)
     return e
