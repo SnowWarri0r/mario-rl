@@ -15,6 +15,9 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "mario_all12_wide.zip"
+# MARIO_DET=1 → 用 argmax 推理。收敛的策略 DET 可能远强于 STO（2-2 梯子专家实测 STO 70% / DET 100%），
+# 没收敛的策略 DET 会卡在某个概率性障碍前反复送死、严重低估——所以两个都要看。
+DET = os.environ.get("MARIO_DET") == "1"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 WORKERS = int(sys.argv[3]) if len(sys.argv) > 3 else min(48, mp.cpu_count())
 STAGES = [f"{w}-{s}" for w in (1, 2, 3) for s in (1, 2, 3, 4)]
@@ -53,7 +56,7 @@ def _run_chunk(task):
         o, _ = env.reset()
         done, maxx, flag, w, s = False, 0, False, w0, s0
         while not done:
-            a, _ = model.predict(o, deterministic=False)   # 未必收敛的策略看 stochastic，det 会低估
+            a, _ = model.predict(o, deterministic=DET)
             o, r, term, trunc, info = env.step(int(a))
             done = term or trunc
             maxx = max(maxx, info.get("x_pos", 0))
@@ -71,7 +74,7 @@ def main():
         left = N
         while left > 0:
             k = min(CHUNK, left); tasks.append((st, k)); left -= k
-    print(f"=== 十二关评估 {MODEL}（每关 {N} 局 stochastic，{WORKERS} 并发，{len(tasks)} 个任务）===", flush=True)
+    print(f"=== 十二关评估 {MODEL}（每关 {N} 局 {'deterministic' if DET else 'stochastic'}，{WORKERS} 并发，{len(tasks)} 个任务）===", flush=True)
 
     agg = {st: [0, 0, []] for st in STAGES}
     failed = 0
