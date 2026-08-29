@@ -50,6 +50,21 @@ def build_cells():
         return [(f"{'抖动重训' if 'noop' in m else '原老师  '} {st}", m, st, 30)
                 for m in ("mario_w1c_final.zip", "mario_w1noop.zip")
                 for st in ("1-1", "1-2", "1-3", "1-4")]
+    if SPEC == "w23pilot":
+        # W2/W3 抖动重训版 vs 原版，逐关比。挑老师要一关一关挑：W1 那轮重训版在 1-2 上反而更差，
+        # 一刀切全换会把好老师换掉。
+        pairs = {
+            "2-1": ("mario_w2noop.zip", "mario_w2land_final.zip", "mario_21expert_v2.zip"),
+            "2-3": ("mario_w2noop.zip", "mario_w2land_final.zip"),
+            "2-4": ("mario_w2noop.zip", "mario_w2land_final.zip"),
+            "3-1": ("mario_w3noop.zip", "mario_w3_final.zip",
+                    "checkpoints_31expert/mario_31exp_1600000_steps.zip"),
+            "3-2": ("mario_w3noop.zip", "mario_w3_final.zip"),
+            "3-3": ("mario_w3noop.zip", "mario_w3_final.zip"),
+            "3-4": ("mario_w3noop.zip", "mario_w3_final.zip"),
+        }
+        return [(f"{st} {os.path.basename(m).replace('.zip','')[:22]}", m, st, 30)
+                for st, ms in pairs.items() for m in ms]
     if SPEC.startswith("models22:"):
         # models22:<a.zip,b.zip,...> → 指定几个模型在 2-2 上按 noop=0/30 各测一遍
         return [(os.path.basename(p).replace(".zip", ""), p, "2-2", k)
