@@ -59,8 +59,10 @@ def main():
         model = Algo(policy, venv, device=DEVICE, ent_coef=0.02, learning_rate=2.5e-4,
                      verbose=1, **kw)
         print(f">>> 从零训 {ARCH} | 叠 {STACK_FRAMES} 帧 | {kw}", flush=True)
-    model.learning_rate = 2.5e-4
-    if ENT:
+    model.learning_rate = float(os.environ.get("MARIO_LR", "2.5e-4"))
+    # 用 is not None 而不是 if ENT：MARIO_ENT=0 是这个项目最有用的设置之一（熵奖励会溶解确定性解），
+    # 靠 "0" 这个字符串碰巧为真撑着太脆——跟 `max_noop=X or 30` 那个坑是同一类
+    if ENT is not None:
         model.ent_coef = float(ENT)
     # ent_coef 默认沿用存档里的 0.02（当年 0.05 太高不收敛、0.01 太低会过早确定化，0.02 是试出来的档）。
     # n_steps 保持存档值 512：PPO.load 已按它建好 rollout buffer，事后改字段 buffer 不会跟着重建，
@@ -68,7 +70,8 @@ def main():
     print(f">>> 2-2 no-op 重训 {total:,} 步 | {n_envs} 环境 | 续 {BASE_MODEL} | 开局随机空按 0-{NOOP_JITTER} 帧 | "
           f"ent_coef {model.ent_coef} | n_steps {model.n_steps} (每轮 {n_envs * model.n_steps} 步) | device {DEVICE}", flush=True)
 
-    ckpt = CheckpointCallback(save_freq=max(250_000 // n_envs, 1),
+    save_every = int(os.environ.get("MARIO_SAVE_FREQ", "250000"))
+    ckpt = CheckpointCallback(save_freq=max(save_every // n_envs, 1),
                               save_path=CKPT_DIR, name_prefix="mario_22noop")
     model.learn(total_timesteps=total, callback=ckpt, reset_num_timesteps=True)
     model.save(OUT)

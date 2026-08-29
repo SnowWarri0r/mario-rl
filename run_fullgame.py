@@ -27,7 +27,11 @@ MAX_STEPS = int(sys.argv[4]) if len(sys.argv) > 4 else 30000
 
 # mode=auto 用的逐关推理模式表：DET/STO 的优劣是逐关分裂的（实测 mario_honest12 @noop=30：
 # 1-4 DET 100% vs STO 55%，而 1-2 DET 9% vs STO 55%）。哪种好按实测挑，别全局二选一。
-DET_STAGES = {"1-4", "2-1", "2-2", "2-4", "3-1", "3-2", "3-3", "3-4"}
+# ⚠️这张表是**跟着模型走的**，换了模型必须按新模型的逐关 DET/STO 实测重填。
+# v5 相比 honest12 就翻了一关：1-3 变成 DET 99% / STO 49%，照旧表打会白丢 50pp。
+# 用 MARIO_DET_STAGES="1-3,1-4,..." 覆盖，省得改代码。
+DET_STAGES = set(filter(None, os.environ.get(
+    "MARIO_DET_STAGES", "1-4,2-1,2-2,2-4,3-1,3-2,3-3,3-4").split(",")))
 
 
 def play(run_id):
