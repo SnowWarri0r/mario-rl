@@ -37,9 +37,11 @@ TEACHERS = {
     "2-1": "checkpoints_s21ent0/s21ent0_3500000_steps.zip",  # 100% DET（原 46）
     "2-2": "mario_22champ.zip",                              # 88% DET（原 34）
     "2-3": "mario_w2land_final.zip",                         # 84%（手术版 83，打平保留原版）
-    "2-4": "checkpoints_w2ent0/w2ent0_750000_steps.zip",     # 98% DET（原 69）
+    # ⚠️边界档不是峰值：w2ent0 那条臂最早的存档就是 750k，按 2.5 万步细扫，
+    # 7.4 万-22.4 万步是一整段 100%。同样的毛病 3-2 也有（它取的是最后一档）。
+    "2-4": "checkpoints_mario_24fine/mario_24fine_99840_steps.zip",   # 100% DET（原 69→98→100）
     "3-1": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100% DET（原 64）
-    "3-2": "checkpoints_w3ent0/w3ent0_6250000_steps.zip",    # 89% DET（原 85）
+    "3-2": "checkpoints_mario_32fine/mario_32fine_99840_steps.zip",   # 100% DET（原 85→89→100）
     "3-3": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100% DET（原 98）
     "3-4": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 96% DET（原 79）
 }

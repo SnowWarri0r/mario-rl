@@ -225,6 +225,13 @@ def make_env_stage13():
     return make_env(stages=["1-3"])
 
 
+# 任意单关工厂：`MARIO_STAGE=2-4 ... train_world_noop.py single`。
+# 走环境变量而不是闭包/partial，因为 SubprocVecEnv 的 forkserver 子进程是**重新 import 模块**
+# 拿到工厂的，闭包捕获的变量传不过去（同一个机制也让 `python - <<EOF` 探测 SubprocVecEnv 会炸）。
+def make_env_single():
+    return make_env(stages=[os.environ["MARIO_STAGE"]])
+
+
 # 单关 2-3 专家训练用：2-3 是最后一个还停在 84% 的关，两次判"保留原版"用的都是 750k 起步的粗档，
 # 而 1-2 已经证明真峰值常在 10 万-40 万步之间——那一段过去从来没看过。
 def make_env_stage23():

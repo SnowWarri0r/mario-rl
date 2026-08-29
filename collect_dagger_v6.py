@@ -45,6 +45,12 @@ JOBS = [
 ]
 SHARDS = 2          # 每关切两片并行，2-2 那 8 万帧一片跑太久
 
+# 配比是随学生变的：第二轮 DAgger 要按新学生的短板重排，而不是沿用上一轮。
+# MARIO_WEIGHTS="2-2:40,1-4:10,..." 覆盖，没列到的关沿用上面的默认权重。
+_ov = dict(kv.split(":") for kv in os.environ.get("MARIO_WEIGHTS", "").split(",") if ":" in kv)
+if _ov:
+    JOBS = [(st, t, int(_ov.get(st, w))) for st, t, w in JOBS]
+
 
 def collect(job):
     stage, teacher_path, n, shard = job
