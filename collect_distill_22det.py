@@ -17,8 +17,11 @@ import numpy as np
 
 TOTAL = int(sys.argv[1]) if len(sys.argv) > 1 else 140_000
 SHARDS = int(sys.argv[2]) if len(sys.argv) > 2 else 4
-TEACHER = "mario_22cur_30.zip"          # 课程撞出来的尖解：argmax 36% / 采样 22%
-OUTDIR = "distill_data_22det"
+TEACHER = os.environ.get("MARIO_TEACHER", "mario_22cur_30.zip")
+# MARIO_ARGMAX=1 才用 argmax 开车。默认采样——上次的教训：argmax 轨迹是条窄管道，覆盖太差，
+# 学生一偏出去就不会走了（11%→0%）。模仿学习要的是状态覆盖，不是最优示范。
+ARGMAX = os.environ.get("MARIO_ARGMAX") == "1"
+OUTDIR = os.environ.get("MARIO_OUTDIR", "distill_data_22det")
 NOOP = 30
 
 
@@ -38,7 +41,7 @@ def collect(job):
         with th.no_grad():
             dist = teacher.policy.get_distribution(ot)
             probs = dist.distribution.probs.cpu().numpy()[0]
-        a = int(np.argmax(probs))                      # argmax 开车（标签还是完整分布）
+        a = int(np.argmax(probs)) if ARGMAX else int(dist.sample().cpu().numpy()[0])
         obs_buf.append(o.astype(np.uint8)); prob_buf.append(probs.astype(np.float32))
         o, r, term, trunc, info = env.step(a)
         if term or trunc:

@@ -27,6 +27,10 @@ SKIP_FRAMES = int(os.environ.get("MARIO_SKIP", "4"))
 # MARIO_STACK=k：叠几帧（默认 4）。叠更多＝能看到更长一段的敌人运动轨迹，
 # 对 2-2 这种"来回游的鱼"也许有用。注意改了它模型就不通用（输入通道数变了，要从零训）。
 STACK_FRAMES = int(os.environ.get("MARIO_STACK", "4"))
+# MARIO_STICKY=p：每步有 p 的概率忽略新动作、重复上一个动作（Machado 2018 的 sticky actions）。
+# no-op starts 只扰动开局，sticky 在整个回合里持续注入扰动——我们的病灶正是"策略跟敌人逐帧锁死"，
+# 这是直接治它的那味药。训练时开了，学出来的策略就不可能再依赖逐帧对齐。
+STICKY_P = float(os.environ.get("MARIO_STICKY", "0"))
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -109,6 +113,25 @@ class NoopReset(gym.Wrapper):
         return o, info
 
 
+# --- 积木 A3：sticky actions。以概率 p 重复上一个动作 ---
+class StickyActions(gym.Wrapper):
+    def __init__(self, env, p=None, seed=None):
+        super().__init__(env)
+        self.p = STICKY_P if p is None else p
+        self.rng = np.random.default_rng(seed)
+        self._last_a = 0
+
+    def reset(self, **kw):
+        self._last_a = 0
+        return self.env.reset(**kw)
+
+    def step(self, a):
+        if self.rng.random() < self.p:
+            a = self._last_a                 # 粘住上一个动作：agent 的指令这一步不生效
+        self._last_a = a
+        return self.env.step(a)
+
+
 # --- 积木 B2：裁掉顶部状态栏（可选）---
 # 分数/命数/时间这些数字对"怎么跳过这个坑"毫无用处，但它们会随游戏进度变化，
 # 等于给同一个场景配了个会变的水印，让策略学到的轨迹依赖当前分数。裁掉＝去掉这个干扰源。
@@ -176,6 +199,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None):
     k = NOOP_JITTER if noop is None else noop
     if k:
         env = NoopReset(env, max_noop=k)     # 单帧粒度地抖相位，要放在跳帧之前
+    if STICKY_P:
+        env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
     env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
     if CROP_HUD if crop is None else crop:
         env = CropHUD(env)
@@ -198,6 +223,19 @@ def make_env_world1_c13():
 # 单关 1-3 专家训练用
 def make_env_stage13():
     return make_env(stages=["1-3"])
+
+
+# 单关 2-3 专家训练用：2-3 是最后一个还停在 84% 的关，两次判"保留原版"用的都是 750k 起步的粗档，
+# 而 1-2 已经证明真峰值常在 10 万-40 万步之间——那一段过去从来没看过。
+def make_env_stage23():
+    return make_env(stages=["2-3"])
+
+
+# 单关 1-2 专家训练用：熵为零那套手术在 1-2 上反而把 45% 打成 9%（地下管道关靠随机扰动脱困，
+# argmax 会锁死在墙上推到超时），所以这关要拆开验：手术其实是三件事，
+# 「熵归零」只是其一，另两件（低 lr + 密存档 + 按实测挑档）不该跟着一起被否掉。
+def make_env_stage12():
+    return make_env(stages=["1-2"])
 
 
 # World 2 陆地关混训：2-1/2-3/2-4 随机采样(2-2 水关另有梯子专家)。跟 World 1 同套路。
@@ -303,6 +341,8 @@ def make_env_stage22_ladder():
 def make_env_stage22_ladder_noop():
     # 抖动量取 MARIO_NOOP（默认 30）。课程式训练就是逐级把它从 4 抬到 30。
     e = MarioBase(stages=["2-2"])
+    if STICKY_P:
+        e = StickyActions(e)
     e = NoopReset(e, max_noop=NOOP_JITTER)   # 0 就是不抖(别写 `or 30`，会把 0 悄悄变成 30)
     e = ShapeReward(e, checkpoints=[(2100.0, 50.0), (2400.0, 50.0),
                                     (2700.0, 50.0), (2900.0, 50.0)])
