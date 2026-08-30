@@ -18,9 +18,9 @@ import numpy as np
 WANT = int(sys.argv[1]) if len(sys.argv) > 1 else 240
 LO = int(sys.argv[2]) if len(sys.argv) > 2 else 1850
 HI = int(sys.argv[3]) if len(sys.argv) > 3 else 2050
-TEACHER = "mario_22cur_30.zip"
-WORKERS = 12
-OUT = "states22_prefixes.npz"
+TEACHER = os.environ.get("MARIO_TEACHER", "mario_22cur_30.zip")
+WORKERS = int(os.environ.get("MARIO_WORKERS", "12"))
+OUT = os.environ.get("MARIO_OUT", "states22_prefixes.npz")
 
 
 def worker(job):
