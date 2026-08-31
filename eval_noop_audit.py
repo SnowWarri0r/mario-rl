@@ -67,6 +67,13 @@ def build_cells():
         }
         return [(f"{st} {os.path.basename(m).replace('.zip','')[:22]}", m, st, 30)
                 for st, ms in pairs.items() for m in ms]
+    if SPEC.startswith("robust:"):
+        # robust:<a.zip,b.zip,...> → 双口径：0-30 是对外可比的主指标（Atari no-op starts 标准），
+        # 0-120 是鲁棒性副指标。为什么要第二条：**训练窗口和评测窗口同为 0-30 时，
+        # 「背下这 31 个相位」就是一种可行策略**——实测 champ 在 0-30 内 27/31，
+        # 出了窗口（31-120）只剩 37%。主指标不动是为了可比，副指标是为了不被记忆策略刷高。
+        return [(os.path.basename(p).replace(".zip", ""), p, EVAL_STAGE, k)
+                for p in SPEC.split(":", 1)[1].split(",") for k in (30, 120)]
     if SPEC.startswith("models22:"):
         # models22:<a.zip,b.zip,...> → 指定几个模型在 2-2 上按 noop=0/30 各测一遍
         return [(os.path.basename(p).replace(".zip", ""), p, EVAL_STAGE, k)
