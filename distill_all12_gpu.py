@@ -41,15 +41,24 @@ for f in files:
     n = len(np.load(f)["probs"]); metas.append((f, n)); print(f"清点 {f}: {n} 条", flush=True)
 N = sum(n for _, n in metas)
 gb = N * 4 * 84 * 84 / 2**30
-print(f">>> 数据 {'+'.join(d.strip() for d in DATA_DIRS)} 共 {N} 条 | obs {gb:.1f}GB 常驻显存 "
+print(f">>> 数据 {'+'.join(d.strip() for d in DATA_DIRS)} 共 {N} 条 | obs {gb:.1f}GB "
       f"| WideNatureCNN(686万参) | {EPOCHS} epochs | batch {BATCH}", flush=True)
 
-# 全量搬进显存：逐文件读 npz（RAM 只过一份，峰值 ~2GB）→ 拷到显存对应区间
-obs_gpu = th.empty((N, 4, 84, 84), dtype=th.uint8, device=DEVICE)
+# MARIO_HOST_OBS=1：obs 留在**主机内存**（pinned），每个 batch 现传。
+# 为什么要这条退路：集群的卡经常被别人占满（实测八张卡各只剩 4-9GB，装不下 28GB 的 obs），
+# 而这些机器有 2TB 内存。代价是每 batch 一次 H2D 拷贝，epoch 慢几倍，但不用排队等卡。
+# pin_memory 让拷贝走 DMA；probs 很小（N×7 float），照旧放显存。
+HOST_OBS = os.environ.get("MARIO_HOST_OBS") == "1"
+if HOST_OBS:
+    print(">>> obs 留主机内存（pinned），每 batch 现传 —— 显存不足时的退路", flush=True)
+    obs_gpu = th.empty((N, 4, 84, 84), dtype=th.uint8).pin_memory()
+else:
+    obs_gpu = th.empty((N, 4, 84, 84), dtype=th.uint8, device=DEVICE)
 prob_list, off = [], 0
 for f, n in metas:
     d = np.load(f)
-    obs_gpu[off:off+n] = th.from_numpy(d["obs"]).to(DEVICE, non_blocking=True)
+    src = th.from_numpy(d["obs"])
+    obs_gpu[off:off+n] = src if HOST_OBS else src.to(DEVICE, non_blocking=True)
     prob_list.append(d["probs"]); off += n
     del d
     print(f"入显存 {f}: {n} 条 ({off}/{N})", flush=True)
@@ -70,12 +79,16 @@ if DOUBLE_NORM:
 opt = th.optim.Adam(student.policy.parameters(), lr=2.5e-4)
 
 for ep in range(EPOCHS):
-    t0 = time.time(); idx = th.randperm(N, device=DEVICE); tot = 0.0
+    t0 = time.time()
+    # HOST_OBS 时索引要在 CPU 上（用它切主机张量），否则在显存上
+    idx = th.randperm(N, device="cpu" if HOST_OBS else DEVICE); tot = 0.0
     for i in range(0, N, BATCH):
         b = idx[i:i+BATCH]
         # obs 已是显存里的 uint8；sb3 preprocess(normalize_images=False) 只做 .float()，/255 交给 WideNatureCNN
-        log_q = student.policy.get_distribution(obs_gpu[b]).distribution.logits
-        loss = -(probs_gpu[b] * log_q).sum(1).mean()        # soft policy distillation: -Σ p_老师·log q_学生
+        ob = obs_gpu[b].to(DEVICE, non_blocking=True) if HOST_OBS else obs_gpu[b]
+        pb = probs_gpu[b.to(DEVICE)] if HOST_OBS else probs_gpu[b]
+        log_q = student.policy.get_distribution(ob).distribution.logits
+        loss = -(pb * log_q).sum(1).mean()        # soft policy distillation: -Σ p_老师·log q_学生
         opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item() * len(b)
     dt = time.time() - t0
     print(f"epoch {ep+1}/{EPOCHS}  loss {tot/N:.4f}  {dt:.1f}s  ({N/dt/1000:.0f}k 帧/s)", flush=True)
