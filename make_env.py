@@ -227,16 +227,20 @@ class FrameStack(gym.Wrapper):
         return np.stack(self.frames, 0), r, term, trunc, info
 
 
-def make_env(stages=None, skip=None, crop=None, noop=None):
+def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
     """把积木叠起来：原始画面 -> 跳帧 ->（裁状态栏）-> 灰度缩小 -> 叠4帧。agent 看到 (4,84,84)。
     stages=None → 单一/完整游戏；stages=['1-1',...] → 随机选关混合训练。
     skip=跳帧数（默认跟随 MARIO_SKIP，陆地 4；水下可调 2 拿更精细的连点控制）。
     crop=是否裁顶部状态栏（默认跟随环境变量 MARIO_CROP；裁与不裁的模型不通用，得配对使用）。
-    noop=开局随机空按 0~noop 个模拟器帧（默认跟随 MARIO_NOOP）。抖相位用，防止策略背轨迹。"""
+    noop=开局随机空按 0~noop 个模拟器帧（默认跟随 MARIO_NOOP）。抖相位用，防止策略背轨迹。
+    exact=True → 空按**恰好** noop 帧（逐相位扫描用）。⚠️ 必须走这个参数，别靠设
+    `os.environ["MARIO_NOOP_EXACT"]`：那个变量在本模块 import 时就读死了（第 38 行），
+    在 import 之后再设完全无效。踩过——`diag_progress.py` 以为自己在枚举 31 个确切相位，
+    实际每局是在 [0,k] 里随机抽，既不可复现、相位还重复，扫出来的整张表全废。"""
     env = MarioBase(stages=stages)
     k = NOOP_JITTER if noop is None else noop
     if k:
-        env = NoopReset(env, max_noop=k)     # 单帧粒度地抖相位，要放在跳帧之前
+        env = NoopReset(env, max_noop=k, exact=exact)   # 单帧粒度地抖相位，要放在跳帧之前
     if STICKY_P:
         env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
     env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
