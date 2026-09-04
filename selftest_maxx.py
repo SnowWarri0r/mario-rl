@@ -87,11 +87,14 @@ def main():
         base = (tot, warps, after) if not maze else base
         if maze:
             assert warps, "这一侧没观察到回卷，说明 make_env_maze 改了动力学"
-            assert [(a, b) for a, b, _ in warps] == [(a, b) for a, b, _ in base[1]], (
-                f"两侧回卷位置不同，不是同一条轨迹，不可比：{warps} vs {base[1]}")
+            # 回卷即终局：max-x 侧只应看到**第一次**回卷，之后这一局就结束了
+            assert len(warps) == 1, (
+                f"max-x 侧看到 {len(warps)} 次回卷，回卷应当直接结束这一局")
+            assert warps[0][:2] == base[1][0][:2], (
+                f"第一次回卷位置与原生侧不一致，不是同一条轨迹：{warps[0]} vs {base[1][0]}")
             worst = max(r / (a - b) for a, b, r in warps)
             assert worst < 0.05, f"回卷步还在按回退量的 {worst:.1%} 发钱，势能没生效"
-            assert after < 0, f"回卷后还挣了 {after:.0f}（原生 {base[2]:.0f}），重复段仍然赚钱"
+            assert after <= 0, f"回卷后还挣了 {after:.0f}（原生 {base[2]:.0f}），重复段仍然赚钱"
             print(f"  ✓ 回卷步收益 ≤ 回退量的 {worst:.2%}；"
                   f"重复段收益 {base[2]:+.0f} → {after:+.0f}，环不可刷了")
 
