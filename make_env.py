@@ -16,6 +16,16 @@ CROP_HUD = os.environ.get("MARIO_CROP") == "1"
 # MARIO_FLUSH=1：过关瞬间把叠帧缓冲清空重填。策略只在"4 帧同属一关"的输入上训过，
 # 关卡交界处那几步的输入是"3 帧上一关 + 1 帧新关"，属于训练里没有的分布。
 FLUSH_ON_STAGE_CHANGE = os.environ.get("MARIO_FLUSH") == "1"
+# MARIO_PRIME=1：过关瞬间**多走几帧把栈填满真实的连续画面**，再把控制权交回策略。
+# 为什么需要第三个选项：flush 和不 flush 都不对，只是错法不同——
+#   不 flush ＝ 3 帧上一关的旗杆 + 1 帧新关（内容错）
+#   flush   ＝ 同一帧复制四份（内容对，但**速度信息为零**）
+# 后者对 2-2 这种水下关是致命的：策略靠 4 帧差分判断鱼往哪游、多快，看到"静止的鱼"就撞上去。
+# 实测把老师放到一个同样冻结的栈上（存档开局），它从 86% 掉到 argmax 21%、32 帧就死。
+# 也正因如此，flush 的收益符号是跟着模型翻的：v6 +0.9 关、v7 +1.2 关、v9 −0.7 关。
+# prime 则两头都对：帧是新关的、且彼此相邻带着运动。代价是新关开头有 n-1 步不由策略决定
+# （沿用它跨关那一步的动作），发生在 x≈40 的出生点附近，那里没有威胁。
+PRIME_ON_STAGE_CHANGE = os.environ.get("MARIO_PRIME") == "1"
 # MARIO_NOOP=k：每次 reset 后先随机空按 0~k 帧，把敌人/移动平台的相位推开（Atari 那套 no-op starts）。
 # 为什么必须有：不加它，每局都从"游戏刚启动"的同一状态开始，相位固定，策略能靠背一段舞步拿分——
 # 实测 2-2 无抖动 64%、抖 0-60 帧后 0/50，那 64% 全是记死的轨迹。训练和评测都要开，否则分数是假的。
@@ -162,12 +172,14 @@ class GrayResize(gym.ObservationWrapper):
 # --- 积木 D：叠帧。把最近 4 张摞成 (4,84,84) ---
 # 单张静止图看不出马里奥在往哪动、速度多快。摞 4 张连续帧，agent 就能'看出运动'。
 class FrameStack(gym.Wrapper):
-    def __init__(self, env, n=None, flush_on_stage_change=None):
+    def __init__(self, env, n=None, flush_on_stage_change=None, prime_on_stage_change=None):
         super().__init__(env)
         self.n = n = STACK_FRAMES if n is None else n
         self.frames = collections.deque(maxlen=n)
         self.observation_space = spaces.Box(0, 255, (n, 84, 84), np.uint8)
         self.flush = FLUSH_ON_STAGE_CHANGE if flush_on_stage_change is None else flush_on_stage_change
+        self.prime = PRIME_ON_STAGE_CHANGE if prime_on_stage_change is None else prime_on_stage_change
+        assert not (self.flush and self.prime), "MARIO_FLUSH 和 MARIO_PRIME 是同一处的两种做法，只能开一个"
         self._ws = None
 
     def reset(self, **kw):
@@ -180,11 +192,23 @@ class FrameStack(gym.Wrapper):
     def step(self, a):
         o, r, term, trunc, info = self.env.step(a)
         self.frames.append(o)
-        if self.flush:
+        if self.flush or self.prime:
             ws = (info.get("world"), info.get("stage"))
-            if self._ws is not None and ws != self._ws:      # 刚进新关卡 → 4 帧全填新画面
+            changed = self._ws is not None and ws != self._ws
+            if changed and self.flush:                       # 4 帧全填新画面（速度信息归零）
                 for _ in range(self.n):
                     self.frames.append(o)
+            elif changed and self.prime:
+                # 多走 n-1 步把栈填满**相邻的**新关画面。沿用跨关这一步的动作 a：
+                # 策略当时在往右跑，继续往右跑最接近它本来会做的事。奖励照常累加，
+                # 中途真结束了就停（出生点附近几乎不会，但不能不防）。
+                for _ in range(self.n - 1):
+                    if term or trunc:
+                        break
+                    o, r2, term, trunc, info = self.env.step(a)
+                    self.frames.append(o)
+                    r += r2
+                ws = (info.get("world"), info.get("stage"))
             self._ws = ws
         return np.stack(self.frames, 0), r, term, trunc, info
 
