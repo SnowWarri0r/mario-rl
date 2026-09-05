@@ -30,18 +30,18 @@ NOOP = int(os.environ.get("MARIO_NOOP", "30"))
 
 # (关卡, 老师, 权重)
 JOBS = [
-    ("2-2", "mario_22champ.zip",                                      34),  # 学生 48 vs 老师 89
-    ("1-2", "checkpoints_mario_12ent0/mario_12ent0_249984_steps.zip", 22),  # 学生 41 vs 新老师 88
-    ("2-3", "mario_w2land_final.zip",                                 10),  # 学生 72 vs 老师 84
-    ("3-4", "checkpoints_w3ent0/w3ent0_2250000_steps.zip",             7),  # 85 vs 96
-    ("1-4", "checkpoints_w1ent0/w1ent0_3500000_steps.zip",             7),  # 86 vs 94
-    ("2-4", "checkpoints_w2ent0/w2ent0_750000_steps.zip",              5),  # 90 vs 98
-    ("1-1", "checkpoints_w1ent0/w1ent0_3500000_steps.zip",             5),  # 91 vs 93
-    ("3-2", "checkpoints_w3ent0/w3ent0_6250000_steps.zip",             3),  # 地板值
-    ("1-3", "checkpoints_w1ent0/w1ent0_6250000_steps.zip",             3),
-    ("2-1", "checkpoints_s21ent0/s21ent0_3500000_steps.zip",           2),
-    ("3-1", "checkpoints_w3ent0/w3ent0_2250000_steps.zip",             1),
-    ("3-3", "checkpoints_w3ent0/w3ent0_2250000_steps.zip",             1),
+    ("2-2", "mario_22robust.zip",                                     34),  # 84/60 唯一没收口的关
+    ("1-3", "checkpoints_w1ent0/w1ent0_6250000_steps.zip",            14),  # 老师 argmax 100% 但采样只 49%，标签最弱
+    ("2-3", "mario_23robust.zip",                                     10),
+    ("2-4", "checkpoints_mario_24fine/mario_24fine_99840_steps.zip",   8),
+    ("3-1", "checkpoints_w3ent0/w3ent0_2250000_steps.zip",             8),
+    ("3-3", "checkpoints_w3ent0/w3ent0_2250000_steps.zip",             8),
+    ("2-1", "checkpoints_s21ent0/s21ent0_3500000_steps.zip",           5),
+    ("1-2", "mario_12robust.zip",                                      4),
+    ("1-4", "mario_14robust.zip",                                      3),
+    ("3-4", "mario_34robust.zip",                                      3),
+    ("1-1", "mario_11robust.zip",                                      2),
+    ("3-2", "mario_32robust.zip",                                      1),
 ]
 SHARDS = 2          # 每关切两片并行，2-2 那 8 万帧一片跑太久
 
