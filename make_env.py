@@ -363,6 +363,10 @@ class ShapeReward(gym.Wrapper):
         return obs, r, term, trunc, info
 
 
+# MARIO_MAZE_NOVELTY=2 → 迷宫关额外给 (x,y) 格子新鲜度奖励（默认 0 关闭）
+MAZE_NOVELTY = float(os.environ.get("MARIO_MAZE_NOVELTY", "0"))
+
+
 # --- 迷宫关奖励：只对"刷新历史最远"发钱（治 4-4/7-4/8-4 的绕圈刷分）---
 class MaxXReward(gym.Wrapper):
     """把原生的 delta-x 奖励换成**单调势能**：只有超过本回合历史最远 x 才有奖励。
@@ -380,7 +384,7 @@ class MaxXReward(gym.Wrapper):
     """
 
     def __init__(self, env, start_ws=None, death_pen=50.0, clear_bonus=500.0, time_pen=0.1,
-                 max_gain=40, warp_drop=300):
+                 max_gain=40, warp_drop=300, cell=16, novelty=0.0):
         super().__init__(env)
         self.start_ws = start_ws; self.death_pen = death_pen
         self.clear_bonus = clear_bonus; self.time_pen = time_pen
@@ -396,6 +400,12 @@ class MaxXReward(gym.Wrapper):
         # 岔路口的尝试次数被摊薄成三分之一。结束这一局＝把这些步数换成新的一次岔路采样，
         # 同时让"走错"真的有代价（吃 death_pen）。马里奥正常一帧退不了 300，不会误伤。
         self.warp_drop = warp_drop
+        # novelty>0：对**首次踏入的 (x,y) 格子**发一次性小奖，格子边长 cell（一个 tile=16px）。
+        # 为什么 max-x 势能不够：它只为**水平**推进付钱。迷宫的两条岔路往往 x 相同、只差 y
+        # （在哪条走廊里），势能对二者完全无差别；而往上/往下试探要花时间却不涨 x，净亏。
+        # 实测 4-4 卡在第二个岔路口 5.5M 步，回卷瞬间的 y 只在 191-218 之间（不到两个 tile），
+        # 也就是**它从来没试过别的高度**。(x,y) novelty 让"换条走廊"本身有收益。
+        self.cell = cell; self.novelty = novelty
 
     def reset(self, **kw):
         out = self.env.reset(**kw)
@@ -404,6 +414,7 @@ class MaxXReward(gym.Wrapper):
         # 整局奖励恒为负——脏读保护会把正常关卡也一起锁死。
         self._maxx = None; self._cleared = False; self._ws0 = self.start_ws
         self._prevx = None
+        self._seen = set()
         self.glitches = 0; self.warped = 0
         return out
 
@@ -422,6 +433,10 @@ class MaxXReward(gym.Wrapper):
         elif gain > 0:
             r += gain                           # 只为"新地方"付钱；回退给 0，不倒扣
             self._maxx = x
+        if self.novelty and gain <= self.max_gain:      # 脏读的 x 不能拿去记格子
+            key = (x // self.cell, (info.get("y_pos", 0) or 0) // self.cell)
+            if key not in self._seen:
+                self._seen.add(key); r += self.novelty
         if not self._cleared and (info.get("flag_get") or (ws[0] and self._ws0 and ws != self._ws0)):
             r += self.clear_bonus; self._cleared = True
         # 走错岔路被传回起点 → 当作一次失败收场，别让它在环里空耗
@@ -434,7 +449,7 @@ class MaxXReward(gym.Wrapper):
         return obs, r, term, trunc, info
 
 
-def build_maze_env(stage, noop=None, exact=None):
+def build_maze_env(stage, noop=None, exact=None, novelty=None):
     """迷宫关的链路：与 make_env 一致，只是在 SkipFrame 前插 MaxXReward。
     单独拆出带参版本，是为了让自检能钉死相位——`make_env_maze` 必须无参（SubprocVecEnv 要 pickle），
     但两种奖励下要跑同一条轨迹做对比，就得能指定 exact 相位。"""
@@ -444,7 +459,7 @@ def build_maze_env(stage, noop=None, exact=None):
         e = NoopReset(e, max_noop=k, exact=exact)
     if STICKY_P:
         e = StickyActions(e)
-    e = MaxXReward(e)
+    e = MaxXReward(e, novelty=MAZE_NOVELTY if novelty is None else novelty)
     e = SkipFrame(e, k=SKIP_FRAMES)
     if CROP_HUD:
         e = CropHUD(e)
@@ -456,6 +471,9 @@ def build_maze_env(stage, noop=None, exact=None):
 def make_env_maze():
     """迷宫关工厂：`MARIO_STAGE=4-4 ... train_world_noop.py maze`"""
     return build_maze_env(os.environ["MARIO_STAGE"])
+
+
+
 
 
 def make_env_stage22_shaped():
