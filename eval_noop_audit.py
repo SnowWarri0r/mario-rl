@@ -21,6 +21,8 @@ CHUNK = 5
 # MARIO_DET=1 → argmax 推理。相位无关的策略用 DET 只是去掉采样噪声（2-2 是精度任务，噪声很贵）；
 # 背轨迹的策略用 DET 才会虚高，那个陷阱现在不成立了。
 DET = os.environ.get("MARIO_DET") == "1"
+# models22/ckpt22 这两个 spec 默认测 2-2，改这个变量可以拿去测别的关
+EVAL_STAGE = os.environ.get("MARIO_EVAL_STAGE", "2-2")
 
 TEACHERS = {
     "1-1": "mario_w1c_final.zip", "1-2": "mario_w1c_final.zip",
@@ -67,7 +69,7 @@ def build_cells():
                 for st, ms in pairs.items() for m in ms]
     if SPEC.startswith("models22:"):
         # models22:<a.zip,b.zip,...> → 指定几个模型在 2-2 上按 noop=0/30 各测一遍
-        return [(os.path.basename(p).replace(".zip", ""), p, "2-2", k)
+        return [(os.path.basename(p).replace(".zip", ""), p, EVAL_STAGE, k)
                 for p in SPEC.split(":", 1)[1].split(",") for k in (0, 30)]
     if SPEC.startswith("ckpt22"):
         # ckpt22:<目录> → 该目录下每个 checkpoint 在 2-2 上按 noop=30 测一遍，
@@ -79,14 +81,24 @@ def build_cells():
             return int(_re.search(r"(\d+)_steps", path).group(1))
         cells = []
         for p in sorted(glob.glob(f"{d}/*.zip"), key=steps_of):
-            cells.append(("%5dk步" % (steps_of(p) // 1000), p, "2-2", 30))
-        cells.append(("梯子专家(起点)", "mario_22ladder_final.zip", "2-2", 30))
+            cells.append(("%5dk步" % (steps_of(p) // 1000), p, EVAL_STAGE, 30))
+        cells.append(("起点参照", os.environ.get("MARIO_REF", "mario_22ladder_final.zip"),
+                      EVAL_STAGE, 30))
         return cells
     raise SystemExit(f"未知 spec: {SPEC}")
 
 
+def _find_noop(env):
+    """在 wrapper 链里找 NoopReset，用来逐局指定精确相位"""
+    while env is not None:
+        if type(env).__name__ == "NoopReset":
+            return env
+        env = getattr(env, "env", None)
+    return None
+
+
 def run_chunk(task):
-    label, model_path, stage, noop, n_eps, seed = task
+    label, model_path, stage, noop, n_eps, seed, off = task
     try:
         import torch as th; th.set_num_threads(1)
         from stable_baselines3 import PPO
@@ -96,7 +108,19 @@ def run_chunk(task):
         env = make_env(stages=[stage], noop=noop)
         w0, s0 = int(stage[0]), int(stage[2])
         clears, xs = 0, []
-        for _ in range(n_eps):
+        # ⚠️argmax 模式下"跑 N 局"是假的样本量：确定性模拟器 + argmax + 固定相位
+        # ＝ 每局轨迹逐帧相同，结果非 0 即 100。实测 2-2 的 31 个相位每个都是纯 0% 或纯 100%。
+        # 所以有效样本量是**相位数**（noop=30 时是 31），不是局数——标准误 ±9pp 而不是 ±3pp。
+        # 这里改成逐个相位各跑一局：同样的算力，有效样本量大几十倍。
+        # off 是这一 chunk 在本格内的起始相位编号（由 main 传入），
+        # 不能用全局 seed 推——seed 跨格递增，会让每一格从不同相位开始
+        phases = [(off + i) % (noop + 1) for i in range(n_eps)] if DET else None
+        nr = _find_noop(env) if phases else None
+        if nr is not None:
+            nr.exact = True
+        for i in range(n_eps):
+            if nr is not None:
+                nr.max_noop = phases[i]
             o, _ = env.reset()
             done, maxx, flag, w, s = False, 0, False, w0, s0
             while not done:
@@ -118,9 +142,14 @@ def main():
     cells = build_cells()
     tasks, seed = [], 0
     for label, m, st, k in cells:
-        left = N
+        # argmax 模式下超过相位数的局数是纯浪费（每个相位的结果完全相同），砍到相位数
+        # noop=0 也只有一个相位，argmax 下跑 300 局就是把同一局重复 300 次
+        left = min(N, k + 1) if DET else N
+        off = 0
         while left > 0:
-            c = min(CHUNK, left); tasks.append((label, m, st, k, c, seed)); seed += 1; left -= c
+            c = min(CHUNK, left)
+            tasks.append((label, m, st, k, c, seed, off))
+            seed += 1; off += c; left -= c
     print(f"=== no-op 体检 [{SPEC}]｜{len(cells)} 格 × {N} 局｜{WORKERS} 并发 ===", flush=True)
 
     agg = {}

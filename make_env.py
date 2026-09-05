@@ -22,14 +22,20 @@ FLUSH_ON_STAGE_CHANGE = os.environ.get("MARIO_FLUSH") == "1"
 #   flush   ＝ 同一帧复制四份（内容对，但**速度信息为零**）
 # 后者对 2-2 这种水下关是致命的：策略靠 4 帧差分判断鱼往哪游、多快，看到"静止的鱼"就撞上去。
 # 实测把老师放到一个同样冻结的栈上（存档开局），它从 86% 掉到 argmax 21%、32 帧就死。
-# 也正因如此，flush 的收益符号是跟着模型翻的：v6 +0.9 关、v7 +1.2 关、v9 −0.7 关。
 # prime 则两头都对：帧是新关的、且彼此相邻带着运动。代价是新关开头有 n-1 步不由策略决定
 # （沿用它跨关那一步的动作），发生在 x≈40 的出生点附近，那里没有威胁。
+# ⚠️**结论：三种做法在 N=288 下完全打平**（不处理 21.5% / flush 19.1% / prime 18.4% 全通率），
+# 名义最优是"什么都不做"。之前"flush 值 +0.9 关""符号跟着模型翻"都是 N=64/96 的噪声，已撤回。
+# 留着这两个开关只为复现旧数字。为什么存档开局是致命的、过关时却无所谓：
+# 过关时马里奥出生在 x≈40 周围什么都没有，三帧退化的观测不要钱；x=1408 是在 2-2 水下、
+# 身边全是鱼，同样三帧就是致命的——同一个缺陷，代价取决于它发生在哪里。
 PRIME_ON_STAGE_CHANGE = os.environ.get("MARIO_PRIME") == "1"
 # MARIO_NOOP=k：每次 reset 后先随机空按 0~k 帧，把敌人/移动平台的相位推开（Atari 那套 no-op starts）。
 # 为什么必须有：不加它，每局都从"游戏刚启动"的同一状态开始，相位固定，策略能靠背一段舞步拿分——
 # 实测 2-2 无抖动 64%、抖 0-60 帧后 0/50，那 64% 全是记死的轨迹。训练和评测都要开，否则分数是假的。
 NOOP_JITTER = int(os.environ.get("MARIO_NOOP", "0"))
+# MARIO_NOOP_EXACT=1：空按恰好 MARIO_NOOP 帧（而不是 0~k 随机），用来逐个相位扫描
+NOOP_EXACT = os.environ.get("MARIO_NOOP_EXACT") == "1"
 # MARIO_SKIP=k：一个动作连按几帧（默认 4）。2-2 那道一格宽的鱼缝要帧级精度，
 # 每个动作硬按 4 帧可能物理上就不够细——改 2 让它能更快连点划水。
 # 注意：训练和评测必须用同一个值，动作粒度变了策略就不通用。
@@ -108,14 +114,22 @@ class SkipFrame(gym.Wrapper):
 
 # --- 积木 A2：no-op starts。reset 后随机空按几帧，只改相位不改别的 ---
 class NoopReset(gym.Wrapper):
-    def __init__(self, env, max_noop=None, seed=None):
+    def __init__(self, env, max_noop=None, seed=None, exact=None):
         super().__init__(env)
         self.max_noop = NOOP_JITTER if max_noop is None else max_noop
+        # exact 做成实例属性（而不是只读全局），评测时可以逐局改成不同的固定相位，
+        # 不必为每个相位重建一个环境（nes-py 初始化要 ~1s）
+        self.exact = NOOP_EXACT if exact is None else exact
         self.rng = np.random.default_rng(seed)
 
     def reset(self, **kw):
         o, info = self.env.reset(**kw)
-        for _ in range(int(self.rng.integers(0, self.max_noop + 1)) if self.max_noop else 0):
+        # MARIO_NOOP_EXACT=1 → 空按**恰好** max_noop 帧，而不是 0~max 里随机取。
+        # 用来逐个相位量通关率：0-30 的平均值会把"某几个相位完全过不去"这件事抹平，
+        # 而连打时进新关的相位不是均匀抽的（由穿过上一关的用时决定），抹平了就看不出系统性偏差。
+        k = self.max_noop if self.exact else (
+            int(self.rng.integers(0, self.max_noop + 1)) if self.max_noop else 0)
+        for _ in range(k):
             o, r, term, trunc, info = self.env.step(0)
             if term or trunc:                                # 极少见：空按到死，重开一次就好
                 o, info = self.env.reset(**kw)
