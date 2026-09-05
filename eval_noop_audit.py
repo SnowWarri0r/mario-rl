@@ -7,6 +7,7 @@
   spec = teachers  各关老师在自己那关上体检（老师是数据源头，它背轨迹＝全部蒸馏数据都带这个毛病）
        = students  三个合并学生的十二关重测
        = curve22   2-2 的降级曲线（0/2/4/8/16/30/60 帧）
+       = grid:<模型逗号分隔>@<关卡逗号分隔>[@<noop逗号分隔>]  任意模型×关卡网格，默认 noop 30/120
 """
 import warnings; warnings.filterwarnings("ignore")
 import os, sys
@@ -74,6 +75,16 @@ def build_cells():
         # 出了窗口（31-120）只剩 37%。主指标不动是为了可比，副指标是为了不被记忆策略刷高。
         return [(os.path.basename(p).replace(".zip", ""), p, EVAL_STAGE, k)
                 for p in SPEC.split(":", 1)[1].split(",") for k in (30, 120)]
+    if SPEC.startswith("grid:"):
+        # grid:<a.zip,b.zip>@<4-1,4-2,4-3>[@<30,120>] → 模型 × 关卡 的笛卡尔积，默认双口径 30/120。
+        # 扩关阶段每个世界都要「一批候选档 × 三四关」地扫，逐关改 MARIO_EVAL_STAGE 再跑一遍
+        # 会把并行度切碎（每关只有 N 局，44 个 worker 喂不满），合成一张网一次跑完。
+        body = SPEC.split(":", 1)[1].split("@")
+        models = [x for x in body[0].split(",") if x]
+        stages = [x for x in body[1].split(",") if x]
+        noops = [int(x) for x in body[2].split(",")] if len(body) > 2 else [30, 120]
+        return [(f"{st} {os.path.basename(m).replace('.zip','')[:26]}", m, st, k)
+                for st in stages for m in models for k in noops]
     if SPEC.startswith("models22:"):
         # models22:<a.zip,b.zip,...> → 指定几个模型在 2-2 上按 noop=0/30 各测一遍
         return [(os.path.basename(p).replace(".zip", ""), p, EVAL_STAGE, k)
