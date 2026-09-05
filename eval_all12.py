@@ -52,13 +52,26 @@ def _run_chunk(task):
     env = make_env(stages=[stage])
     clears, xs = 0, []
     w0, s0 = int(stage[0]), int(stage[2])
+    # ⚠️MARIO_ONE_LIFE=1：第一次掉命就结束这一局。
+    # 为什么需要它：默认的 `while not done` 里 done 是 **game over（三条命耗尽）**，
+    # 也就是说单关评测其实允许**最多三次尝试**，报的是"三次之内过掉"的概率；
+    # 而连打里的条件成功率是"进关一次算一次"。两个量根本不同，
+    # 我拿它们相减得出的"组合落差"因此有一大块是**口径造成的**，不是策略退化。
+    # 对账：单关 97% 若来自三次机会，单次成功率 p 满足 1-(1-p)^3=0.97 → p≈0.69，
+    # 而 v12 在连打里的 1-3 正是 70%；v10 的 3-3 单关 100% → p≈0.68，连打里正是 68%。
+    one_life = os.environ.get("MARIO_ONE_LIFE") == "1"
     for _ in range(n_eps):
         o, _ = env.reset()
         done, maxx, flag, w, s = False, 0, False, w0, s0
+        life = None
         while not done:
             a, _ = model.predict(o, deterministic=DET)
             o, r, term, trunc, info = env.step(int(a))
             done = term or trunc
+            lf = info.get("life")
+            if one_life and life is not None and lf is not None and lf < life:
+                done = True                    # 掉了一条命就算这次尝试失败
+            life = lf
             maxx = max(maxx, info.get("x_pos", 0))
             flag = flag or info.get("flag_get", False)
             w, s = info.get("world", w), info.get("stage", s)
