@@ -23,27 +23,25 @@ import numpy as np
 PER_STAGE = int(sys.argv[1]) if len(sys.argv) > 1 else 70_000
 SHARDS = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 NOOP = int(sys.argv[3]) if len(sys.argv) > 3 else 30
-OUTDIR = "distill_data_v5"
+OUTDIR = os.environ.get("MARIO_OUTDIR", "distill_data_v5")
 
-# 括号里是该老师在这一关的实测通关率（N=150 @ noop=30，取它自己最优的推理模式）
+# 括号里是该老师的 主指标(no-op 0-30) / 鲁棒性(0-120)，都是逐相位或 N>=200 实测。
+# ⚠️采集窗口固定 0-30（跟部署和 v7 对齐）：robust 老师虽然在 0-120 上也强，但用 0-120 采集会
+# 带进"开局已沉底"这类连打里根本不出现的状态（2-2 下沉实测见 diag_noop_drift.py），
+# 而且会让"老师代际"之外多出第二个变量。
 TEACHERS = {
-    "1-1": "checkpoints_w1ent0/w1ent0_3500000_steps.zip",    # 93% STO（原 68）
-    # ⚠️这一档是后来才找到的：手术版在 1-2 上曾判"有害（9%）"，那是因为当时最早的存档是 750k，
-    # 早滑过峰值了。按 2.5 万步重扫，10 万-40 万步是一整段 81-91% 的平台，N=400 复核 88%，
-    # 而且 noop=0 与 noop=30 只差 1pp（原老师差 27pp，那 27 全是背相位的水分）。
-    "1-2": "checkpoints_mario_12ent0/mario_12ent0_249984_steps.zip",  # 88% STO（原 45）
-    "1-3": "checkpoints_w1ent0/w1ent0_6250000_steps.zip",    # 100% DET（原 39）
-    "1-4": "checkpoints_w1ent0/w1ent0_3500000_steps.zip",    # 94% DET（原 82）
-    "2-1": "checkpoints_s21ent0/s21ent0_3500000_steps.zip",  # 100% DET（原 46）
-    "2-2": "mario_22champ.zip",                              # 88% DET（原 34）
-    "2-3": "mario_w2land_final.zip",                         # 84%（手术版 83，打平保留原版）
-    # ⚠️边界档不是峰值：w2ent0 那条臂最早的存档就是 750k，按 2.5 万步细扫，
-    # 7.4 万-22.4 万步是一整段 100%。同样的毛病 3-2 也有（它取的是最后一档）。
-    "2-4": "checkpoints_mario_24fine/mario_24fine_99840_steps.zip",   # 100% DET（原 69→98→100）
-    "3-1": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100% DET（原 64）
-    "3-2": "checkpoints_mario_32fine/mario_32fine_99840_steps.zip",   # 100% DET（原 85→89→100）
-    "3-3": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100% DET（原 98）
-    "3-4": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 96% DET（原 79）
+    "1-1": "mario_11robust.zip",                             # 100/100（原 92/93）
+    "1-2": "mario_12robust.zip",                             #  95/94（原 87/55）
+    "1-3": "checkpoints_w1ent0/w1ent0_6250000_steps.zip",    # 100/100 未换
+    "1-4": "mario_14robust.zip",                             # 100/100（原 90/88）
+    "2-1": "checkpoints_s21ent0/s21ent0_3500000_steps.zip",  # 100/98 未换
+    "2-2": "mario_22robust.zip",                             #  84/60（原 87/37）唯一没收口的关
+    "2-3": "mario_23robust.zip",                             #  91/91（原 79/82）
+    "2-4": "checkpoints_mario_24fine/mario_24fine_99840_steps.zip",   # 100/100 未换
+    "3-1": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100/100 未换
+    "3-2": "mario_32robust.zip",                             # 100/100（原 100/48，七成是相位）
+    "3-3": "checkpoints_w3ent0/w3ent0_2250000_steps.zip",    # 100/100 未换
+    "3-4": "mario_34robust.zip",                             # 100/100（原 94/74）
 }
 
 
