@@ -263,6 +263,13 @@ def make_env_stage13():
     return make_env(stages=["1-3"])
 
 
+# 任意多关混训工厂：`MARIO_STAGES=4-1,4-2,4-3 ... train_world_noop.py multi`。
+# 扩到 World 4-8 时不必再为每个世界写一个函数（w1/w2land/w3 那三个是历史遗留）。
+# 同样走环境变量而不是闭包——forkserver 子进程是重新 import 模块拿工厂的。
+def make_env_multi():
+    return make_env(stages=[x for x in os.environ["MARIO_STAGES"].split(",") if x])
+
+
 # 任意单关工厂：`MARIO_STAGE=2-4 ... train_world_noop.py single`。
 # 走环境变量而不是闭包/partial，因为 SubprocVecEnv 的 forkserver 子进程是**重新 import 模块**
 # 拿到工厂的，闭包捕获的变量传不过去（同一个机制也让 `python - <<EOF` 探测 SubprocVecEnv 会炸）。
