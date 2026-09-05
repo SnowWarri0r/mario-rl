@@ -59,7 +59,7 @@ class MarioBase(gym.Env):
         # 给 stages 列表（如 ['1-1','1-2','1-3','1-4']）→ 每次 reset 随机选一关（路线A 混合训练）
         import gym_super_mario_bros
         from nes_py.wrappers import JoypadSpace
-        from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+        from gym_super_mario_bros.actions import SIMPLE_MOVEMENT, COMPLEX_MOVEMENT
         if stages:
             e = gym_super_mario_bros.make("SuperMarioBrosRandomStages-v0",
                                           stages=list(stages),
@@ -69,9 +69,15 @@ class MarioBase(gym.Env):
             e = gym_super_mario_bros.make("SuperMarioBros-v0",
                                           apply_api_compatibility=True,
                                           render_mode="rgb_array")
-        self._e = JoypadSpace(e, SIMPLE_MOVEMENT)      # 把 256 种按键组合，砍成 7 个常用动作
+        # MARIO_COMPLEX=1 → 12 动作。**8-4 必须用它**：正确路线要下管道，而 SIMPLE_MOVEMENT
+        # 里根本没有 `down`（实测 down 只在 COMPLEX 的第 10 号位），拿 SIMPLE 训 8-4 是无解的。
+        # 已核实 `SIMPLE_MOVEMENT == COMPLEX_MOVEMENT[:7]` 逐字为真，所以：
+        #   · 现有 7 动作老师全部不用重训，它们的 7 维概率补 5 个 0 就能喂 12 动作学生；
+        #   · 但 7 动作模型和 12 动作 env 的 action_space 对不上，不能混用，得显式开关。
+        moves = COMPLEX_MOVEMENT if os.environ.get("MARIO_COMPLEX") == "1" else SIMPLE_MOVEMENT
+        self._e = JoypadSpace(e, moves)                # 把 256 种按键组合砍成 7/12 个常用动作
         self.observation_space = spaces.Box(0, 255, (240, 256, 3), np.uint8)
-        self.action_space = spaces.Discrete(len(SIMPLE_MOVEMENT))
+        self.action_space = spaces.Discrete(len(moves))
         self._last = None
 
     def reset(self, *, seed=None, options=None):
@@ -374,7 +380,7 @@ class MaxXReward(gym.Wrapper):
     """
 
     def __init__(self, env, start_ws=None, death_pen=50.0, clear_bonus=500.0, time_pen=0.1,
-                 max_gain=40):
+                 max_gain=40, warp_drop=300):
         super().__init__(env)
         self.start_ws = start_ws; self.death_pen = death_pen
         self.clear_bonus = clear_bonus; self.time_pen = time_pen
@@ -384,6 +390,12 @@ class MaxXReward(gym.Wrapper):
         # 原生 delta-x 奖励把每帧增量截在 ±15，一直替我们盖住了这个脏读；换成势能就露出来了。
         # 马里奥一个模拟器帧最多前进 ~6 px，40 已经很宽松，超过就是脏读，丢弃不更新 maxx。
         self.max_gain = max_gain
+        # ⚠️ warp_drop：x 一步倒退这么多＝走错岔路被传回环的起点，**直接结束这一局**。
+        # 光把绕圈收益压成 0 是不够的：agent 照样在环里跑，只是不赚钱了。实测 4-4 每局 650 步
+        # （4-3 只要 200），第一次回卷之后的三分之二时间全在零收益地重跑同一条走廊，
+        # 岔路口的尝试次数被摊薄成三分之一。结束这一局＝把这些步数换成新的一次岔路采样，
+        # 同时让"走错"真的有代价（吃 death_pen）。马里奥正常一帧退不了 300，不会误伤。
+        self.warp_drop = warp_drop
 
     def reset(self, **kw):
         out = self.env.reset(**kw)
@@ -391,7 +403,8 @@ class MaxXReward(gym.Wrapper):
         # 若 maxx 从 0 起，第一步的 gain 直接超过 max_gain 被判成脏读，maxx 永远推不动，
         # 整局奖励恒为负——脏读保护会把正常关卡也一起锁死。
         self._maxx = None; self._cleared = False; self._ws0 = self.start_ws
-        self.glitches = 0
+        self._prevx = None
+        self.glitches = 0; self.warped = 0
         return out
 
     def step(self, a):
@@ -411,6 +424,11 @@ class MaxXReward(gym.Wrapper):
             self._maxx = x
         if not self._cleared and (info.get("flag_get") or (ws[0] and self._ws0 and ws != self._ws0)):
             r += self.clear_bonus; self._cleared = True
+        # 走错岔路被传回起点 → 当作一次失败收场，别让它在环里空耗
+        if (self._prevx is not None and not self._cleared
+                and self._prevx - x >= self.warp_drop):
+            self.warped += 1; term = True
+        self._prevx = x
         if (term or trunc) and not self._cleared:
             r -= self.death_pen
         return obs, r, term, trunc, info
