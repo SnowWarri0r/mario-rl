@@ -357,6 +357,89 @@ class ShapeReward(gym.Wrapper):
         return obs, r, term, trunc, info
 
 
+# --- 迷宫关奖励：只对"刷新历史最远"发钱（治 4-4/7-4/8-4 的绕圈刷分）---
+class MaxXReward(gym.Wrapper):
+    """把原生的 delta-x 奖励换成**单调势能**：只有超过本回合历史最远 x 才有奖励。
+
+    为什么必须换。原生 SMB 奖励是逐帧 delta-x。迷宫城堡走错路会把你传回环的起点，
+    x 从 1023 一步掉回 11——实测**那一步的奖励是 +9**（不是 -1012，也不是截断后的 -15）。
+    于是绕一圈净赚 ~1012，agent 学会的是刷圈不是通关：实测 569 步里绕了 4 圈，
+    整局正奖励 5723、负奖励只有 -14，`ep_rew_mean` 7.6e3 量的其实是圈数。
+    这也是为什么 4-4 的 ep_rew_mean 比别的关高 3 倍——那不是学得好，是刷得多。
+
+    换成 max-x 势能后，第二次跑同一段走廊收益为 0，想拿分只能走出没走过的路，
+    也就是找到正确岔路。回退不扣分（掉坑已有 death_pen 管），所以不会因为怕扣分而不敢探索。
+
+    ⚠️ 这个 wrapper 要放在 SkipFrame **之前**（跟 ShapeReward 一样看原始 info）。
+    """
+
+    def __init__(self, env, start_ws=None, death_pen=50.0, clear_bonus=500.0, time_pen=0.1,
+                 max_gain=40):
+        super().__init__(env)
+        self.start_ws = start_ws; self.death_pen = death_pen
+        self.clear_bonus = clear_bonus; self.time_pen = time_pen
+        # ⚠️ max_gain 不是调参，是防脏读。`x_pos` 偶尔会读出 65535（16 位下溢），
+        # 无截断的势能会为这一步发 +65535。实测中招后每局奖励是双峰的：
+        # 正常局 100-900，中招局 65,000 上下，ep_rew_mean 被拉到 2.3e4。
+        # 原生 delta-x 奖励把每帧增量截在 ±15，一直替我们盖住了这个脏读；换成势能就露出来了。
+        # 马里奥一个模拟器帧最多前进 ~6 px，40 已经很宽松，超过就是脏读，丢弃不更新 maxx。
+        self.max_gain = max_gain
+
+    def reset(self, **kw):
+        out = self.env.reset(**kw)
+        # ⚠️ 起点必须用"第一次看到的 x"来播种，不能用 0：马里奥开局 x 就有 40 上下，
+        # 若 maxx 从 0 起，第一步的 gain 直接超过 max_gain 被判成脏读，maxx 永远推不动，
+        # 整局奖励恒为负——脏读保护会把正常关卡也一起锁死。
+        self._maxx = None; self._cleared = False; self._ws0 = self.start_ws
+        self.glitches = 0
+        return out
+
+    def step(self, a):
+        obs, _r, term, trunc, info = self.env.step(a)
+        ws = (info.get("world"), info.get("stage"))
+        if self._ws0 is None and ws[0]:
+            self._ws0 = ws                      # 第一步才知道自己在哪关，不必外部传
+        x = info.get("x_pos", 0) or 0
+        r = -self.time_pen                      # 每步小额时间成本，压住原地磨蹭
+        if self._maxx is None:
+            self._maxx = x                      # 播种，不发钱
+        gain = x - self._maxx
+        if gain > self.max_gain:
+            self.glitches += 1                  # 脏读：既不发钱也不推高 maxx
+        elif gain > 0:
+            r += gain                           # 只为"新地方"付钱；回退给 0，不倒扣
+            self._maxx = x
+        if not self._cleared and (info.get("flag_get") or (ws[0] and self._ws0 and ws != self._ws0)):
+            r += self.clear_bonus; self._cleared = True
+        if (term or trunc) and not self._cleared:
+            r -= self.death_pen
+        return obs, r, term, trunc, info
+
+
+def build_maze_env(stage, noop=None, exact=None):
+    """迷宫关的链路：与 make_env 一致，只是在 SkipFrame 前插 MaxXReward。
+    单独拆出带参版本，是为了让自检能钉死相位——`make_env_maze` 必须无参（SubprocVecEnv 要 pickle），
+    但两种奖励下要跑同一条轨迹做对比，就得能指定 exact 相位。"""
+    e = MarioBase(stages=[stage])
+    k = NOOP_JITTER if noop is None else noop
+    if k:
+        e = NoopReset(e, max_noop=k, exact=exact)
+    if STICKY_P:
+        e = StickyActions(e)
+    e = MaxXReward(e)
+    e = SkipFrame(e, k=SKIP_FRAMES)
+    if CROP_HUD:
+        e = CropHUD(e)
+    e = GrayResize(e, size=84)
+    e = FrameStack(e)
+    return e
+
+
+def make_env_maze():
+    """迷宫关工厂：`MARIO_STAGE=4-4 ... train_world_noop.py maze`"""
+    return build_maze_env(os.environ["MARIO_STAGE"])
+
+
 def make_env_stage22_shaped():
     # MarioBase → ShapeReward(看原始 r+info) → SkipFrame → GrayResize → FrameStack
     e = MarioBase(stages=["2-2"])
