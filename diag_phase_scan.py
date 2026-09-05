@@ -16,6 +16,7 @@
 
 用法: python diag_phase_scan.py [每相位局数] [最大相位] [并发]   默认 60 / 30 / 40
       MARIO_MODELS="a.zip,b.zip" 指定模型；MARIO_EVAL_STAGE 指定关卡
+      MARIO_PAIRS="1-1:a.zip,1-2:b.zip" 每个模型在它自己那一关上扫（体检整套老师班底用）
 """
 import warnings; warnings.filterwarnings("ignore")
 import os, sys
@@ -29,19 +30,22 @@ MAXP = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 WORKERS = int(sys.argv[3]) if len(sys.argv) > 3 else 40
 MODELS = os.environ.get("MARIO_MODELS", "mario_v9_wide.zip,mario_v7_wide.zip").split(",")
 STAGE = os.environ.get("MARIO_EVAL_STAGE", "2-2")
+# MARIO_PAIRS="1-1:a.zip,1-2:b.zip,..." → 每个模型在它自己那一关上扫。
+# 用来一次性体检整套老师班底：每关的老师不同，不能共用一个 MARIO_EVAL_STAGE。
+PAIRS = [kv.split(":", 1) for kv in os.environ.get("MARIO_PAIRS", "").split(",") if ":" in kv]
 DET = os.environ.get("MARIO_DET", "1") == "1"
 
 
 def run(job):
-    model_path, phase, n = job
+    model_path, phase, n, stage = job
     import torch as th; th.set_num_threads(1)
     from stable_baselines3 import PPO
     from make_env import make_env
     import wide_cnn  # noqa: F401
 
     m = PPO.load(model_path, device="cpu")
-    env = make_env(stages=[STAGE], noop=phase)     # NOOP_EXACT 已开 → 恰好空按 phase 帧
-    w0, s0 = (int(x) for x in STAGE.split("-"))
+    env = make_env(stages=[stage], noop=phase)     # NOOP_EXACT 已开 → 恰好空按 phase 帧
+    w0, s0 = (int(x) for x in stage.split("-"))
     cleared = 0
     for _ in range(n):
         o, _ = env.reset()
@@ -55,20 +59,25 @@ def run(job):
             done = term or trunc
         cleared += bool(info.get("flag_get") or (info.get("world"), info.get("stage")) != (w0, s0))
     env.close()
-    return model_path, phase, cleared, n
+    return (stage, model_path), phase, cleared, n
 
 
 def main():
-    print(f"=== {STAGE} 逐相位扫描（{'argmax' if DET else '采样'}，每相位 {N} 局）===", flush=True)
-    jobs = [(mp, ph, N) for mp in MODELS for ph in range(MAXP + 1)]
-    res = {mp: {} for mp in MODELS}
+    # PAIRS 优先：每个模型在它自己那一关上扫
+    work = PAIRS if PAIRS else [(STAGE, mp) for mp in MODELS]
+    print(f"=== 逐相位扫描（{'argmax' if DET else '采样'}，每相位 {N} 局，"
+          f"{len(work)} 个模型 × {MAXP+1} 个相位）===", flush=True)
+    jobs = [(mp, ph, N, st) for st, mp in work for ph in range(MAXP + 1)]
+    # ⚠️key 必须是 (关卡, 模型)：3-1/3-3/3-4 共用同一个 w3ent0 文件，
+    # 只按模型路径做 key 会让它们互相覆盖
+    res = {(st, mp): {} for st, mp in work}
     with ProcessPoolExecutor(max_workers=WORKERS) as pool:
-        for mp, ph, c, n in pool.map(run, jobs):
-            res[mp][ph] = c / n * 100
-    for mp in MODELS:
-        r = res[mp]
+        for key, ph, c, n in pool.map(run, jobs):
+            res[key][ph] = c / n * 100
+    for st, mp in work:
+        r = res[(st, mp)]
         vals = [r[p] for p in range(MAXP + 1)]
-        print(f"\n--- {os.path.basename(mp)} ---", flush=True)
+        print(f"\n--- {st} {os.path.basename(mp)} ---", flush=True)
         for p in range(MAXP + 1):
             bar = "#" * int(vals[p] / 4)
             print(f"  空按 {p:2d} 帧  {vals[p]:5.0f}%  {bar}", flush=True)
