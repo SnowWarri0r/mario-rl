@@ -1,6 +1,7 @@
 """马里奥环境 + 预处理。每个 wrapper 是一个'积木'，决定 agent 看到什么。"""
 import warnings; warnings.filterwarnings("ignore")
 import collections
+import math
 import os
 import numpy as np
 import cv2
@@ -365,6 +366,8 @@ class ShapeReward(gym.Wrapper):
 
 # MARIO_MAZE_NOVELTY=2 → 迷宫关额外给 (x,y) 格子新鲜度奖励（默认 0 关闭）
 MAZE_NOVELTY = float(os.environ.get("MARIO_MAZE_NOVELTY", "0"))
+# MARIO_MAZE_PERSIST=1 → 访问计数跨回合累计，奖励 1/sqrt(n) 衰减
+MAZE_PERSIST = os.environ.get("MARIO_MAZE_PERSIST") == "1"
 
 
 # --- 迷宫关奖励：只对"刷新历史最远"发钱（治 4-4/7-4/8-4 的绕圈刷分）---
@@ -384,7 +387,7 @@ class MaxXReward(gym.Wrapper):
     """
 
     def __init__(self, env, start_ws=None, death_pen=50.0, clear_bonus=500.0, time_pen=0.1,
-                 max_gain=40, warp_drop=300, cell=16, novelty=0.0):
+                 max_gain=40, warp_drop=300, cell=16, novelty=0.0, persist=False):
         super().__init__(env)
         self.start_ws = start_ws; self.death_pen = death_pen
         self.clear_bonus = clear_bonus; self.time_pen = time_pen
@@ -406,6 +409,16 @@ class MaxXReward(gym.Wrapper):
         # 实测 4-4 卡在第二个岔路口 5.5M 步，回卷瞬间的 y 只在 191-218 之间（不到两个 tile），
         # 也就是**它从来没试过别的高度**。(x,y) novelty 让"换条走廊"本身有收益。
         self.cell = cell; self.novelty = novelty
+        # persist=True → 访问计数**跨回合**累计，奖励按 1/sqrt(次数) 衰减（count-based exploration）。
+        # 为什么非要跨回合：回合内 novelty 治不了 4-4，实测它把 y 的探索跨度从 27 拉到 84
+        # （机制确实生效了）却仍是 0/31。看了画面才明白——那一段有上下两条走廊，
+        # 正确路线在下层，而**两条走廊 x 区间相同**：max-x 势能对二者无差别，
+        # 回合内 per-cell novelty 也对称（跑上层同样在开新格子），中间没有任何梯度区分两条路。
+        # 跨回合计数才打破对称：上层被走过几千遍、奖励衰减到近 0，下层始终是新的。
+        # 计数按 worker 各存各的（64 个子进程不做 IPC）——每个 worker 都在重复走上层，
+        # 不共享也照样能压低上层的分，够用且零通信开销。
+        self.persist = persist
+        self._counts = collections.Counter() if persist else None
 
     def reset(self, **kw):
         out = self.env.reset(**kw)
@@ -414,7 +427,7 @@ class MaxXReward(gym.Wrapper):
         # 整局奖励恒为负——脏读保护会把正常关卡也一起锁死。
         self._maxx = None; self._cleared = False; self._ws0 = self.start_ws
         self._prevx = None
-        self._seen = set()
+        self._seen = set()          # 本回合已发过奖的格子（同一格一回合只发一次）
         self.glitches = 0; self.warped = 0
         return out
 
@@ -436,7 +449,12 @@ class MaxXReward(gym.Wrapper):
         if self.novelty and gain <= self.max_gain:      # 脏读的 x 不能拿去记格子
             key = (x // self.cell, (info.get("y_pos", 0) or 0) // self.cell)
             if key not in self._seen:
-                self._seen.add(key); r += self.novelty
+                self._seen.add(key)
+                if self.persist:
+                    self._counts[key] += 1
+                    r += self.novelty / math.sqrt(self._counts[key])
+                else:
+                    r += self.novelty
         if not self._cleared and (info.get("flag_get") or (ws[0] and self._ws0 and ws != self._ws0)):
             r += self.clear_bonus; self._cleared = True
         # 走错岔路被传回起点 → 当作一次失败收场，别让它在环里空耗
@@ -449,7 +467,7 @@ class MaxXReward(gym.Wrapper):
         return obs, r, term, trunc, info
 
 
-def build_maze_env(stage, noop=None, exact=None, novelty=None):
+def build_maze_env(stage, noop=None, exact=None, novelty=None, persist=None):
     """迷宫关的链路：与 make_env 一致，只是在 SkipFrame 前插 MaxXReward。
     单独拆出带参版本，是为了让自检能钉死相位——`make_env_maze` 必须无参（SubprocVecEnv 要 pickle），
     但两种奖励下要跑同一条轨迹做对比，就得能指定 exact 相位。"""
@@ -459,7 +477,8 @@ def build_maze_env(stage, noop=None, exact=None, novelty=None):
         e = NoopReset(e, max_noop=k, exact=exact)
     if STICKY_P:
         e = StickyActions(e)
-    e = MaxXReward(e, novelty=MAZE_NOVELTY if novelty is None else novelty)
+    e = MaxXReward(e, novelty=MAZE_NOVELTY if novelty is None else novelty,
+                   persist=MAZE_PERSIST if persist is None else persist)
     e = SkipFrame(e, k=SKIP_FRAMES)
     if CROP_HUD:
         e = CropHUD(e)
