@@ -46,16 +46,18 @@ TEACHERS = {
     "5-3": ("checkpoints_mario_53exp/mario_53exp_5499648_steps.zip", 100, None),
     "5-4": ("checkpoints_mario_54exp/mario_54exp_3749760_steps.zip", 100, None),
     # --- World 6（2026-09-06）---
-    # 混训 8M：6-1 100 / 6-2 55 / 6-3 0 / 6-4 23，又是同一个形状。6-2/6-3/6-4 专家训练中。
+    # 混训 8M 是 100/55/0/23，专家之后 100/100/100/87。6-3 又是一次 0 → 100。
     "6-1": ("checkpoints_mario_w6/mario_w6_4499712_steps.zip",       100, None),
+    "6-2": ("checkpoints_mario_62exp/mario_62exp_2999808_steps.zip", 100, None),
+    "6-3": ("checkpoints_mario_63exp/mario_63exp_2999808_steps.zip", 100, None),
+    "6-4": ("checkpoints_mario_64exp/mario_64exp_5499648_steps.zip",  87, None),
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
 # 上下两条走廊 x 区间相同，max-x 势能与 per-cell novelty 对二者都对称，
 # 中间没有任何梯度区分，要等跨回合的持久访问计数 / Go-Explore。
 MAZE_STAGES = ["4-4", "7-4", "8-4"]
-TODO_STAGES = (["6-2", "6-3", "6-4"]
-               + [f"7-{i}" for i in range(1, 4)]
+TODO_STAGES = ([f"7-{i}" for i in range(1, 4)]
                + [f"8-{i}" for i in range(1, 4)]
                + MAZE_STAGES)
 
