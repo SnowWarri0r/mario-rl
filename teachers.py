@@ -39,16 +39,22 @@ TEACHERS = {
     "4-3": ("checkpoints_mario_43exp/mario_43exp_4499712_steps.zip", 100, 100),
 
     # --- World 5（2026-09-06）---
+    # 四关全部出自专家续训。混训 8M 的成绩是 42/0/0/29，专家之后 84/90/100/100，
+    # 「混训打底 + 逐关专家」这条路到此有两个世界的完整证据。
+    "5-1": ("checkpoints_mario_51exp/mario_51exp_5749632_steps.zip",  84, None),  # 还在震荡，待熵归零
     "5-2": ("checkpoints_mario_52exp/mario_52exp_5749632_steps.zip",  90, None),
     "5-3": ("checkpoints_mario_53exp/mario_53exp_5499648_steps.zip", 100, None),
+    "5-4": ("checkpoints_mario_54exp/mario_54exp_3749760_steps.zip", 100, None),
+    # --- World 6（2026-09-06）---
+    # 混训 8M：6-1 100 / 6-2 55 / 6-3 0 / 6-4 23，又是同一个形状。6-2/6-3/6-4 专家训练中。
+    "6-1": ("checkpoints_mario_w6/mario_w6_4499712_steps.zip",       100, None),
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
 # 上下两条走廊 x 区间相同，max-x 势能与 per-cell novelty 对二者都对称，
 # 中间没有任何梯度区分，要等跨回合的持久访问计数 / Go-Explore。
 MAZE_STAGES = ["4-4", "7-4", "8-4"]
-TODO_STAGES = (["5-1", "5-4"]
-               + [f"6-{i}" for i in range(1, 5)]
+TODO_STAGES = (["6-2", "6-3", "6-4"]
                + [f"7-{i}" for i in range(1, 4)]
                + [f"8-{i}" for i in range(1, 4)]
                + MAZE_STAGES)
