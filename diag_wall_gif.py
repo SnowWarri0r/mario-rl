@@ -11,7 +11,7 @@ y 一直贴地＝**它根本没起跳**（策略里没有这个动作）；y 冲
 ⚠️ nes-py 的屏幕是原地覆盖的内存，`raw.render()` 每次返回同一个数组对象，
 必须 `np.array(...)` 拷贝，否则 GIF 全是最后一帧（这个项目最早踩过）。
 
-用法: MARIO_DET=1 python diag_wall_gif.py <模型> <关卡> [空按帧数]
+用法: MARIO_DET=1 python diag_wall_gif.py <模型> <关卡> [空按帧数（确切相位）]
 """
 import warnings; warnings.filterwarnings("ignore")
 import os, sys, collections
@@ -33,8 +33,11 @@ def main():
     import wide_cnn  # noqa: F401
     from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 
-    os.environ["MARIO_NOOP_EXACT"] = "1"
-    env = make_env(stages=[STAGE], noop=NOOP)
+    # ⚠️ 走 exact= 参数。设 MARIO_NOOP_EXACT 环境变量在这里**无效**——上面几行刚
+    # `from make_env import make_env`，那个变量在 make_env 的模块级就读死了。
+    # 这个坑在 diag_progress 里修过一次，这个文件漏了：症状是三个"不同相位"跑出
+    # 逐字相同的轨迹（同一步、同一个 x），因为实际上是在 [0,k] 里随机抽、且抽到了同一个。
+    env = make_env(stages=[STAGE], noop=NOOP, exact=True)
     # 找到底层的 nes-py env 拿原始彩色帧：包装链上每层都有 .env
     raw = env
     while hasattr(raw, "env"):
