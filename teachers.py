@@ -60,17 +60,24 @@ TEACHERS = {
     #   7-1：17/31 停在 x≈2800（终点 2857），单一障碍、就差一口气 → 接着训 / 熵归零
     #   7-2：死点从 x=518 铺到 3161，**没有卡点** → 不是障碍是不会玩。水关签名，
     #        跟 2-2 同一类（旧十二关唯一没收口的就是 2-2，84/60，挡过七种办法）
-    "7-1": ("checkpoints_mario_71exp/mario_71exp_5249664_steps.zip",  48, None),
-    "7-2": ("checkpoints_mario_72exp/mario_72exp_1249920_steps.zip",   3, None),
+    "7-1": ("checkpoints_mario_71b/mario_71b_7749504_steps.zip",      65, None),
+    "7-2": ("checkpoints_mario_72b/mario_72b_14999760_steps.zip",     13, None),
     "7-3": ("checkpoints_mario_73exp/mario_73exp_5749632_steps.zip",  87, None),
+    # --- World 8（2026-09-07）---
+    # 全游戏最难的一个世界：混训 8M 三关全 0%，专家一轮之后 0/35/71。
+    # 8-1 的形状值得注意：30/31 停在 x≈3870，y 匀速降到 254 回卷、x 冻在 3858——掉坑，
+    # 不是计时器超时（超时会散在不同 x 上）。卡点前打得很顺，属于"给步数"那一类，
+    # 跟 4-3 同形（4-3 也是 0/31 一直到 3.75M 才突变）。已续训。
+    "8-1": ("checkpoints_mario_81exp/mario_81exp_7999488_steps.zip",   0, None),
+    "8-2": ("checkpoints_mario_82exp/mario_82exp_7999488_steps.zip",  35, None),
+    "8-3": ("checkpoints_mario_83exp/mario_83exp_6749568_steps.zip",  71, None),
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
 # 上下两条走廊 x 区间相同，max-x 势能与 per-cell novelty 对二者都对称，
 # 中间没有任何梯度区分，要等跨回合的持久访问计数 / Go-Explore。
 MAZE_STAGES = ["4-4", "7-4", "8-4"]
-TODO_STAGES = ([f"8-{i}" for i in range(1, 4)]
-               + MAZE_STAGES)
+TODO_STAGES = list(MAZE_STAGES)
 
 ALL_STAGES = [f"{w}-{s}" for w in range(1, 9) for s in range(1, 5)]
 
