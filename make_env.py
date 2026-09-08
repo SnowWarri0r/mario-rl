@@ -527,6 +527,37 @@ def make_env_maze():
 
 
 
+def make_env_shaped():
+    """通用塑形工厂：`MARIO_STAGE=7-2 MARIO_CKPTS=800:40,1400:40,... train_world_noop.py shaped`
+
+    为什么给 7-2 补这个：7-2 打了 ~36M 步卡在 13%，死点从 x=518 铺到 3161、**没有卡点**，
+    也就是"到处死"而不是"卡在一处"。我先前把它归成"跟 2-2 同病、可能得改 skip"，
+    但漏了一件事——**2-2 的 84% 是带塑形拿到的，7-2 至今一直是裸奖励**。
+    ShapeReward 的注释写得很清楚，它当初就是为"治水关死一片"加的：
+    死一次重罚 death_pen，安全通关给 clear_bonus，让"苟着走完"比"冲一段就死"值钱。
+    ⇒ 在动 skip（会让模型不通用、破坏"一个网络打完全部关卡"）之前，先把这一招补上。
+    """
+    stage = os.environ["MARIO_STAGE"]
+    cks = [(float(x.split(":")[0]), float(x.split(":")[1]))
+           for x in os.environ.get("MARIO_CKPTS", "").split(",") if ":" in x]
+    w, st = (int(v) for v in stage.split("-"))
+    e = MarioBase(stages=[stage])
+    if NOOP_JITTER:
+        e = NoopReset(e, max_noop=NOOP_JITTER)
+    if STICKY_P:
+        e = StickyActions(e)
+    e = ShapeReward(e, start_ws=(w, st),
+                    death_pen=float(os.environ.get("MARIO_DEATH_PEN", "50")),
+                    clear_bonus=float(os.environ.get("MARIO_CLEAR_BONUS", "200")),
+                    checkpoints=cks)
+    e = SkipFrame(e, k=SKIP_FRAMES)
+    if CROP_HUD:
+        e = CropHUD(e)
+    e = GrayResize(e, size=84)
+    e = FrameStack(e)
+    return e
+
+
 def make_env_stage22_shaped():
     # MarioBase → ShapeReward(看原始 r+info) → SkipFrame → GrayResize → FrameStack
     e = MarioBase(stages=["2-2"])
