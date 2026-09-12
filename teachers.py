@@ -16,6 +16,8 @@ eval_noop_audit / run_fullgame），十二关时勉强能对得上，扩到 32 �
 """
 
 # 关卡 -> (模型, 主指标 %, 鲁棒 %)
+# ⚠️ 表里存在**不够格当老师**的条目（7-1 48%、7-2 3%）：记下来是为了让 weights() 配重、
+# 也为了不假装它们已收口。拿它们去收蒸馏数据之前先看分数。
 TEACHERS = {
     # --- World 1-3：熵归零手术后的班底（2026-09-03 定稿）---
     "1-1": ("mario_11robust.zip",                                   100, 100),
@@ -51,14 +53,23 @@ TEACHERS = {
     "6-2": ("checkpoints_mario_62exp/mario_62exp_2999808_steps.zip", 100, None),
     "6-3": ("checkpoints_mario_63exp/mario_63exp_2999808_steps.zip", 100, None),
     "6-4": ("checkpoints_mario_64exp/mario_64exp_5499648_steps.zip",  87, None),
+    # --- World 7（2026-09-07）---
+    # 混训 8M 只有 10/3/0，专家之后 48/3/87。两关不够格当老师，但分数记在这里，
+    # weights() 会自动给它们配重数据。
+    # ⚠️ 7-1 和 7-2 是**两种不同的病**，别用同一招：
+    #   7-1：17/31 停在 x≈2800（终点 2857），单一障碍、就差一口气 → 接着训 / 熵归零
+    #   7-2：死点从 x=518 铺到 3161，**没有卡点** → 不是障碍是不会玩。水关签名，
+    #        跟 2-2 同一类（旧十二关唯一没收口的就是 2-2，84/60，挡过七种办法）
+    "7-1": ("checkpoints_mario_71exp/mario_71exp_5249664_steps.zip",  48, None),
+    "7-2": ("checkpoints_mario_72exp/mario_72exp_1249920_steps.zip",   3, None),
+    "7-3": ("checkpoints_mario_73exp/mario_73exp_5749632_steps.zip",  87, None),
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
 # 上下两条走廊 x 区间相同，max-x 势能与 per-cell novelty 对二者都对称，
 # 中间没有任何梯度区分，要等跨回合的持久访问计数 / Go-Explore。
 MAZE_STAGES = ["4-4", "7-4", "8-4"]
-TODO_STAGES = ([f"7-{i}" for i in range(1, 4)]
-               + [f"8-{i}" for i in range(1, 4)]
+TODO_STAGES = ([f"8-{i}" for i in range(1, 4)]
                + MAZE_STAGES)
 
 ALL_STAGES = [f"{w}-{s}" for w in range(1, 9) for s in range(1, 5)]
