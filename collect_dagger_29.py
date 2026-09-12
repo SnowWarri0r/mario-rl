@@ -29,7 +29,11 @@ OUTDIR = os.environ.get("MARIO_OUTDIR", "distill_data_dagger_29")
 NOOP = int(os.environ.get("MARIO_NOOP", "30"))
 SHARDS = int(os.environ.get("MARIO_SHARDS", "2"))
 WORKERS = int(os.environ.get("MARIO_WORKERS", "40"))
-FLOOR = int(os.environ.get("MARIO_FLOOR", "2"))     # 强关也给个地板值，防重蒸时漂移掉
+# 强关的地板值。⚠️ 第一轮用 2 太低，出过事：3-3 本来 100%（31/31），DAgger 里按地板只分到
+# 2000 帧（占合并数据的 0.65%），重蒸之后掉到 16%（5/31）——它仍然能走到 x=2409 那个终点
+# 附近（跟满分时同一个位置），只是最后一下过不去了。也就是说**地板太低护不住已经满分的关**，
+# 而且失败方式很局部（不是忘了怎么玩，是终点前那一下丢了）。
+FLOOR = int(os.environ.get("MARIO_FLOOR", "10"))
 
 
 def student_scores(path):
