@@ -193,9 +193,16 @@ class GrayResize(gym.ObservationWrapper):
 # --- 积木 D：叠帧。把最近 4 张摞成 (4,84,84) ---
 # 单张静止图看不出马里奥在往哪动、速度多快。摞 4 张连续帧，agent 就能'看出运动'。
 class FrameStack(gym.Wrapper):
-    def __init__(self, env, n=None, flush_on_stage_change=None, prime_on_stage_change=None):
+    def __init__(self, env, n=None, flush_on_stage_change=None, prime_on_stage_change=None,
+                 prime_on_reset=False):
         super().__init__(env)
         self.n = n = STACK_FRAMES if n is None else n
+        # prime_on_reset：**重置之后**再走 n-1 步，让栈里是真实相邻的帧而不是同一帧复制 n 份。
+        # 专为存档开局而加。存档开局本身位置是真的（靠重放动作前缀走到的），
+        # 坏就坏在栈：reset 把一帧复制四份＝速度信息为零，实测老师从 86% 掉到 argmax 21%、32 帧就死。
+        # 用哪个动作来 prime：ArchiveStart 会把快照那一刻正在按的动作放进 info["prime_action"]，
+        # 沿用它才能保住动量方向（拿 NOOP 去 prime 等于先松手减速，那是另一种失真）。
+        self.prime_on_reset = prime_on_reset
         self.frames = collections.deque(maxlen=n)
         self.observation_space = spaces.Box(0, 255, (n, 84, 84), np.uint8)
         self.flush = FLUSH_ON_STAGE_CHANGE if flush_on_stage_change is None else flush_on_stage_change
@@ -204,8 +211,33 @@ class FrameStack(gym.Wrapper):
         self._ws = None
 
     def reset(self, **kw):
-        o, info = self.env.reset(**kw)
-        for _ in range(self.n):
+        # ⚠️ prime 有可能把这一局走死（存档点就在危险位置时）。走死了**必须重开**，
+        # 不能带着一个 done 的环境返回——外层紧接着 step 会直接炸
+        # `ValueError: cannot step in a done environment`（踩过）。
+        dead = False
+        for _ in range(8):
+            o, info = self.env.reset(**kw)
+            self.frames.clear()
+            self.frames.append(o)
+            if not self.prime_on_reset:
+                break
+            a = int(info.get("prime_action", 0))
+            dead = False
+            while len(self.frames) < self.n:
+                o, r, term, trunc, info = self.env.step(a)
+                self.frames.append(o)
+                if term or trunc:
+                    dead = True
+                    break
+            if not dead:
+                break
+        if dead:
+            # 重试还是死：存档点本身就在"再按这个动作就撞上去"的位置上。
+            # 退回不 prime 的普通重置——栈会退化，但至少返回的是个活环境。
+            # 绝不能带着 done 的环境返回，外层紧接着 step 会炸。
+            o, info = self.env.reset(**kw)
+            self.frames.clear()
+        while len(self.frames) < self.n:
             self.frames.append(o)
         self._ws = None
         return np.stack(self.frames, 0), info
@@ -594,10 +626,13 @@ class ArchiveStart(gym.Wrapper):
         self.prefixes = prefixes
         self.rng = np.random.default_rng(seed)
         self._snapped = False
+        self._prime_action = 0                   # 快照那一刻正在按的动作，交给 FrameStack 去 prime
 
     def reset(self, **kw):
         if self._snapped:
-            return self.env.reset(**kw)          # 自动恢复到快照
+            o, info = self.env.reset(**kw)       # 自动恢复到快照
+            info = dict(info); info["prime_action"] = self._prime_action
+            return o, info
         for _ in range(8):                       # 前缀可能因相位不同走死，多试几条
             o, info = self.env.reset(**kw)
             pre = self.prefixes[int(self.rng.integers(len(self.prefixes)))]
@@ -615,6 +650,8 @@ class ArchiveStart(gym.Wrapper):
             if ok:
                 _find_nes(self.env)._backup()
                 self._snapped = True
+                self._prime_action = int(pre[-1]) if len(pre) else 0
+                info = dict(info); info["prime_action"] = self._prime_action
                 return o, info
         return self.env.reset(**kw)              # 都失败就老老实实从头开始
 
