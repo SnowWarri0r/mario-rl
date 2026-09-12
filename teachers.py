@@ -60,17 +60,19 @@ TEACHERS = {
     #   7-1：17/31 停在 x≈2800（终点 2857），单一障碍、就差一口气 → 接着训 / 熵归零
     #   7-2：死点从 x=518 铺到 3161，**没有卡点** → 不是障碍是不会玩。水关签名，
     #        跟 2-2 同一类（旧十二关唯一没收口的就是 2-2，84/60，挡过七种办法）
-    "7-1": ("checkpoints_mario_71b/mario_71b_7749504_steps.zip",      65, None),
+    "7-1": ("checkpoints_mario_71c/mario_71c_9499392_steps.zip",      90, None),
     "7-2": ("checkpoints_mario_72b/mario_72b_14999760_steps.zip",     13, None),
     "7-3": ("checkpoints_mario_73exp/mario_73exp_5749632_steps.zip",  87, None),
     # --- World 8（2026-09-07）---
     # 全游戏最难的一个世界：混训 8M 三关全 0%，专家一轮之后 0/35/71。
     # 8-1 的形状值得注意：30/31 停在 x≈3870，y 匀速降到 254 回卷、x 冻在 3858——掉坑，
     # 不是计时器超时（超时会散在不同 x 上）。卡点前打得很顺，属于"给步数"那一类，
-    # 跟 4-3 同形（4-3 也是 0/31 一直到 3.75M 才突变）。已续训。
-    "8-1": ("checkpoints_mario_81exp/mario_81exp_7999488_steps.zip",   0, None),
-    "8-2": ("checkpoints_mario_82exp/mario_82exp_7999488_steps.zip",  35, None),
-    "8-3": ("checkpoints_mario_83exp/mario_83exp_6749568_steps.zip",  71, None),
+    # 跟 4-3 同形（4-3 也是 0/31 一直到 3.75M 才突变）。
+    # ⇒ 续训验证了这个判断：8-1 0→65、8-2 35→94、8-3 71→84、7-1 65→90，四关全涨。
+    #   「有明确卡点 + 卡点前打得顺」＝给步数就行，这条现在有 5 个关卡的证据（含 4-3）。
+    "8-1": ("checkpoints_mario_81b/mario_81b_9499392_steps.zip",      65, None),
+    "8-2": ("checkpoints_mario_82b/mario_82b_9999360_steps.zip",      94, None),
+    "8-3": ("checkpoints_mario_83b/mario_83b_7499520_steps.zip",      84, None),
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
