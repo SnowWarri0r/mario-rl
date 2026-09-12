@@ -43,7 +43,7 @@ TEACHERS = {
     # --- World 5（2026-09-06）---
     # 四关全部出自专家续训。混训 8M 的成绩是 42/0/0/29，专家之后 84/90/100/100，
     # 「混训打底 + 逐关专家」这条路到此有两个世界的完整证据。
-    "5-1": ("checkpoints_mario_51exp/mario_51exp_5749632_steps.zip",  84, None),  # 还在震荡，待熵归零
+    "5-1": ("checkpoints_mario_51e0/mario_51e0_2749824_steps.zip",   100, None),  # 熵归零 84→100
     "5-2": ("checkpoints_mario_52exp/mario_52exp_5749632_steps.zip",  90, None),
     "5-3": ("checkpoints_mario_53exp/mario_53exp_5499648_steps.zip", 100, None),
     "5-4": ("checkpoints_mario_54exp/mario_54exp_3749760_steps.zip", 100, None),
@@ -61,7 +61,7 @@ TEACHERS = {
     #   7-2：死点从 x=518 铺到 3161，**没有卡点** → 不是障碍是不会玩。水关签名，
     #        跟 2-2 同一类（旧十二关唯一没收口的就是 2-2，84/60，挡过七种办法）
     "7-1": ("checkpoints_mario_71c/mario_71c_9499392_steps.zip",      90, None),
-    "7-2": ("checkpoints_mario_72b/mario_72b_14999760_steps.zip",     13, None),
+    "7-2": ("checkpoints_mario_72c/mario_72c_749952_steps.zip",       13, None),  # ~36M 步纹丝不动
     "7-3": ("checkpoints_mario_73exp/mario_73exp_5749632_steps.zip",  87, None),
     # --- World 8（2026-09-07）---
     # 全游戏最难的一个世界：混训 8M 三关全 0%，专家一轮之后 0/35/71。
@@ -70,9 +70,9 @@ TEACHERS = {
     # 跟 4-3 同形（4-3 也是 0/31 一直到 3.75M 才突变）。
     # ⇒ 续训验证了这个判断：8-1 0→65、8-2 35→94、8-3 71→84、7-1 65→90，四关全涨。
     #   「有明确卡点 + 卡点前打得顺」＝给步数就行，这条现在有 5 个关卡的证据（含 4-3）。
-    "8-1": ("checkpoints_mario_81b/mario_81b_9499392_steps.zip",      65, None),
+    "8-1": ("checkpoints_mario_81c/mario_81c_8499456_steps.zip",      97, None),
     "8-2": ("checkpoints_mario_82b/mario_82b_9999360_steps.zip",      94, None),
-    "8-3": ("checkpoints_mario_83b/mario_83b_7499520_steps.zip",      84, None),
+    "8-3": ("checkpoints_mario_83e0/mario_83e0_3499776_steps.zip",    87, None),  # 熵归零 84→87
 }
 
 # 还没有老师的关。迷宫城堡单列，它们卡在同一个病上：
