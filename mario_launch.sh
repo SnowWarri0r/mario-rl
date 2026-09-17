@@ -26,7 +26,11 @@ setsid nohup bash -c "
   # 自己这一份跑完了。还有别的 mario 任务在跑就别动租约（多个任务共用一份租约）；
   # 一个都没有了才释放，免得留一条 STALE 挂在账本上占着八张卡。
   sleep 30
-  if ! pgrep -f 'train_world_noop|distill_all12|collect_distill|collect_dagger' >/dev/null 2>&1; then
+  # ⚠️ 判"还有没有别的任务"必须**排除自己**：pgrep -f 会匹配到这段心跳脚本自己的命令行
+  # （字符串里就含 train_world_noop 这些词），于是永远认为还有任务在跑、永远不释放。
+  # 实测因此又挂了一条 43 小时的 STALE 租约。跟笔记里"pkill -f 会杀父 shell"同一个根因。
+  # 用 pgrep -x python 按**可执行名**数，不按命令行匹配。
+  if [ "$(pgrep -c -x python)" -eq 0 ] 2>/dev/null; then
     gpuwatch release 158 --owner xzh-claude >/dev/null 2>&1
   fi
 " > /dev/null 2>&1 < /dev/null &
