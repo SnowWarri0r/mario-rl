@@ -400,6 +400,9 @@ class ShapeReward(gym.Wrapper):
 MAZE_NOVELTY = float(os.environ.get("MARIO_MAZE_NOVELTY", "0"))
 # MARIO_MAZE_PERSIST=1 → 访问计数跨回合累计，奖励 1/sqrt(n) 衰减
 MAZE_PERSIST = os.environ.get("MARIO_MAZE_PERSIST") == "1"
+# MARIO_MAZE_GATES="x:ylo:yhi:bonus,..." → 已知正解的 (x,y) 路标
+MAZE_GATES = tuple(tuple(float(v) for v in g.split(":"))
+                   for g in os.environ.get("MARIO_MAZE_GATES", "").split(",") if g.count(":") == 3)
 
 
 # --- 迷宫关奖励：只对"刷新历史最远"发钱（治 4-4/7-4/8-4 的绕圈刷分）---
@@ -419,7 +422,8 @@ class MaxXReward(gym.Wrapper):
     """
 
     def __init__(self, env, start_ws=None, death_pen=50.0, clear_bonus=500.0, time_pen=0.1,
-                 max_gain=40, warp_drop=300, cell=16, novelty=0.0, persist=False):
+                 max_gain=40, warp_drop=300, cell=16, novelty=0.0, persist=False,
+                 lane_gates=()):
         super().__init__(env)
         self.start_ws = start_ws; self.death_pen = death_pen
         self.clear_bonus = clear_bonus; self.time_pen = time_pen
@@ -451,6 +455,15 @@ class MaxXReward(gym.Wrapper):
         # 不共享也照样能压低上层的分，够用且零通信开销。
         self.persist = persist
         self._counts = collections.Counter() if persist else None
+        # lane_gates = [(x, y_lo, y_hi, bonus), ...]：**首次**在 y∈[y_lo,y_hi] 的条件下越过 x，发一次性奖励。
+        # 这是把**已知正解**直接编成路标，而不是再让探索去碰——迷宫城堡的走法是公开资料：
+        #   4-4：两段迷宫，第一段走**上**、第二段走**下**（fandom / strategywiki）
+        #   7-4：下 → 中 → 上
+        #   8-4：要下管道，必须 MARIO_COMPLEX=1 才有 down
+        # 之前四种奖励 / 随机 / 816 组扰动 / 两种束搜索全败，共同点是都在**生产候选路线**；
+        # 但候选根本不用搜，查一下就有，手里缺的从来只是候选而不是验证手段。
+        # 形式上这跟 2-2 当年手放 checkpoints=[(2100,60)] 是同一种做法，本项目既有实践。
+        self.lane_gates = sorted(lane_gates)
 
     def reset(self, **kw):
         out = self.env.reset(**kw)
@@ -460,6 +473,7 @@ class MaxXReward(gym.Wrapper):
         self._maxx = None; self._cleared = False; self._ws0 = self.start_ws
         self._prevx = None
         self._seen = set()          # 本回合已发过奖的格子（同一格一回合只发一次）
+        self._gates = set()         # 本回合已领过的路标
         self.glitches = 0; self.warped = 0
         return out
 
@@ -487,6 +501,10 @@ class MaxXReward(gym.Wrapper):
                     r += self.novelty / math.sqrt(self._counts[key])
                 else:
                     r += self.novelty
+        y = info.get("y_pos", 0) or 0
+        for gi, (gx, ylo, yhi, gb) in enumerate(self.lane_gates):
+            if gi not in self._gates and x > gx and ylo <= y <= yhi:
+                self._gates.add(gi); r += gb
         if not self._cleared and (info.get("flag_get") or (ws[0] and self._ws0 and ws != self._ws0)):
             r += self.clear_bonus; self._cleared = True
         # 走错岔路被传回起点 → 当作一次失败收场，别让它在环里空耗
@@ -499,7 +517,7 @@ class MaxXReward(gym.Wrapper):
         return obs, r, term, trunc, info
 
 
-def build_maze_env(stage, noop=None, exact=None, novelty=None, persist=None):
+def build_maze_env(stage, noop=None, exact=None, novelty=None, persist=None, gates=None):
     """迷宫关的链路：与 make_env 一致，只是在 SkipFrame 前插 MaxXReward。
     单独拆出带参版本，是为了让自检能钉死相位——`make_env_maze` 必须无参（SubprocVecEnv 要 pickle），
     但两种奖励下要跑同一条轨迹做对比，就得能指定 exact 相位。"""
@@ -510,7 +528,8 @@ def build_maze_env(stage, noop=None, exact=None, novelty=None, persist=None):
     if STICKY_P:
         e = StickyActions(e)
     e = MaxXReward(e, novelty=MAZE_NOVELTY if novelty is None else novelty,
-                   persist=MAZE_PERSIST if persist is None else persist)
+                   persist=MAZE_PERSIST if persist is None else persist,
+                   lane_gates=MAZE_GATES if gates is None else gates)
     e = SkipFrame(e, k=SKIP_FRAMES)
     if CROP_HUD:
         e = CropHUD(e)
