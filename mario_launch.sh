@@ -10,6 +10,7 @@
 #     治法：心跳循环退出时，确认机器上没有别的 mario 任务了，就自动释放。
 set -e
 cd /mnt/nfs/xzh/mario-rl
+HOST=${MARIO_HOST:-158}          # 换机器时传 MARIO_HOST，别再写死
 GPU=$1; LOG=$2; shift 2
 ENVS=(); while [ "$1" != "--" ]; do ENVS+=("$1"); shift; done; shift
 
@@ -18,19 +19,26 @@ CUDA_VISIBLE_DEVICES=$GPU env "${ENVS[@]}" \
 PID=$!
 echo "$LOG PID=$PID"
 
+# 把本次 PID 记到共享清单里，收工时按清单判断"还有没有别的 mario 任务"
+PIDFILE=/tmp/mario_pids
+echo $PID >> $PIDFILE
+
 setsid nohup bash -c "
   while kill -0 $PID 2>/dev/null; do
-    gpuwatch heartbeat 158 --owner xzh-claude >/dev/null 2>&1
+    gpuwatch heartbeat $HOST --owner xzh-claude >/dev/null 2>&1
     sleep 2400
   done
-  # 自己这一份跑完了。还有别的 mario 任务在跑就别动租约（多个任务共用一份租约）；
-  # 一个都没有了才释放，免得留一条 STALE 挂在账本上占着八张卡。
   sleep 30
-  # ⚠️ 判"还有没有别的任务"必须**排除自己**：pgrep -f 会匹配到这段心跳脚本自己的命令行
-  # （字符串里就含 train_world_noop 这些词），于是永远认为还有任务在跑、永远不释放。
-  # 实测因此又挂了一条 43 小时的 STALE 租约。跟笔记里"pkill -f 会杀父 shell"同一个根因。
-  # 用 pgrep -x python 按**可执行名**数，不按命令行匹配。
-  if [ "$(pgrep -c -x python)" -eq 0 ] 2>/dev/null; then
-    gpuwatch release 158 --owner xzh-claude >/dev/null 2>&1
+  # ⚠️ 判'还有没有别的任务'**别用模式匹配**，两种错法都踩过：
+  #   pgrep -f '…train_world_noop…' → 匹配到这段脚本自己的命令行，永远认为有任务，永远不释放
+  #                                    （挂了一条 43 小时的 STALE 租约）
+  #   pgrep -c -x python            → 共享机器上别人的 python 也算进来（实测某节点 276 个），
+  #                                    同样永远不释放
+  # 只认自己登记过的 PID：逐个 kill -0，全死光才释放。
+  alive=0
+  while read -r p; do kill -0 \"\$p\" 2>/dev/null && alive=\$((alive+1)); done < $PIDFILE
+  if [ \"\$alive\" -eq 0 ]; then
+    gpuwatch release $HOST --owner xzh-claude >/dev/null 2>&1
+    : > $PIDFILE
   fi
 " > /dev/null 2>&1 < /dev/null &
