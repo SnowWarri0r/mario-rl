@@ -608,6 +608,69 @@ def make_env_maze():
     return build_maze_env(os.environ["MARIO_STAGE"])
 
 
+def _nes_of(env):
+    """顺着 .env 链找到底层 SuperMarioBrosEnv（带 ram / _backup / _restore）。必须在 reset 之后调。"""
+    n = env.unwrapped._e
+    while not hasattr(n, "ram"):
+        n = n.env
+    return n
+
+
+def drive_44_to_bottom(env, model_path=None):
+    """把 4-4 开到第二段底路入口（站在底层 $B0，x≈1515），返回底层 NES 实例。
+
+    路线（见 demo_44_route.py）：策略开到 x≥1500 → 按右直到站上中层($80) 且 x>1590 →
+    按左直到掉进 x 1523-1539 的 1 格缺口、站上底层($B0)。31 个相位实测 31/31 到达。
+    底层走廊从左边走不进去，缺口左侧柱顶悬着一块砖，所以必须从右边进。"""
+    import torch as th
+    from stable_baselines3 import PPO
+    import wide_cnn  # noqa: F401
+    # ⚠️ 这会在 SubprocVecEnv 的每个子进程里各跑一遍。不限线程时每个进程开满全部核
+    #    （实测 64 进程 × 159 线程，负载 1100+，初始化 7 分钟都没开完）。
+    th.set_num_threads(1)
+    m = PPO.load(model_path or os.environ.get("MARIO_44_PREFIX",
+                 "checkpoints_mario_44p/mario_44p_7999488_steps.zip"), device="cpu")
+    o, _ = env.reset()
+    n = _nes_of(env)
+    X = lambda: int(n.ram[0x6D]) * 256 + int(n.ram[0x86])
+    Y = lambda: int(n.ram[0xCE])
+    ST = lambda: int(n.ram[0x1D])
+    for _ in range(2500):
+        if X() >= 1500:
+            break
+        ot, _ = m.policy.obs_to_tensor(o)
+        with th.no_grad():
+            a = int(m.policy.get_distribution(ot).distribution.probs.argmax())
+        o, *_ = env.step(a)
+    for a, want in ((1, lambda: Y() == 0x80 and ST() == 0 and X() > 1590),
+                    (6, lambda: Y() == 0xB0 and ST() == 0)):
+        for _ in range(200):
+            o, r, term, trunc, info = env.step(a)
+            assert not (term or trunc), f"开往底路入口时死了 x={X()}"
+            if want():
+                break
+        else:
+            raise RuntimeError(f"没到达预定楼层 x={X()} Y=${Y():02X}")
+    return n
+
+
+def make_env_44bottom():
+    """4-4 第二段专项：每个回合**从底路入口开局**，只练 火棍 → 站地过第 9 页检查 → 库巴桥。
+
+    为什么不从关卡起点训：入口动作（上平台 → 掉到中层 → 往左进 1 格缺口）是确定性脚本，
+    31/31 可靠，不需要学；而入口之后这段两个现成模型都打不过（44p 过检查 10/31、通关 1/31；
+    学生 v42 甚至往左走进岩浆）。从起点训，每回合都要先花几百步走到这里，采样全浪费在前半段。
+
+    做法：构造时用 drive_44_to_bottom 开到入口，然后 _backup() 把它设成 reset 的存档点
+    （nes-py 只有一个存档槽，reset 就是 _restore）。之后每次 reset 都从入口开始，
+    NoopReset 在它之后随机空按 0-NOOP_JITTER 帧，打乱火棍和库巴的相位。
+    奖励用 build_maze_env 的 MaxXReward：x 势能 + **回卷直接结束回合**（=没站在底层过检查）。"""
+    e = build_maze_env("4-4")
+    n = drive_44_to_bottom(e)
+    n._backup()
+    return e
+
+
 
 
 

@@ -72,6 +72,8 @@ def main():
     os.makedirs(OUTDIR, exist_ok=True)
     assert NOOP, "必须开抖动，否则收的是固定相位下的数据（学生会学成背轨迹）"
 
+    # 4-4 的老师是状态专家（要读 RAM、有状态），不能 PPO.load；它的数据走 collect_44.py
+    STAGES = [s for s in STAGES if not T.is_state_expert(s)]
     skipped = [(s, T.TEACHERS[s][1]) for s in STAGES
                if s not in T.TEACHERS or T.TEACHERS[s][1] < MIN_SCORE]
     use = [s for s in STAGES if s not in dict(skipped)]
