@@ -6,7 +6,7 @@
 用法: python playthrough_stats.py <fg日志> ...
 """
 import re, math, sys
-order = ["1-1","1-2","1-3","1-4","2-1","2-2","2-3","2-4","3-1","3-2","3-3","3-4","4-1","4-2","4-3","4-4"]
+order = [f"{w}-{s}" for w in range(1, 9) for s in range(1, 5)]   # 连打按这个顺序串
 for f in sys.argv[1:]:
     sec = open(f).read().split("逐关真实成功率")[1].split("按进关形态")[0]
     rows = {m.group(1): (int(m.group(2)), int(m.group(3)), int(m.group(4)))
