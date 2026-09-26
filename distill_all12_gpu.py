@@ -88,6 +88,29 @@ probs_gpu = th.as_tensor(np.concatenate(prob_list), dtype=th.float32, device=DEV
 del prob_list
 print(f">>> 数据就位，显存占用 {th.cuda.memory_allocated()/2**30:.1f}GB", flush=True)
 
+# MARIO_TEMP：把老师的软目标锐化。T=1 原样；T<1 变尖；T=0 取 argmax 硬标签。
+# **动机来自实测，不是调参碰运气。** 全量下界(老师分布熵的均值)=0.8346，
+# v32 实测 0.8600 —— 只差 0.025，已吃掉常数解(1.8556)到下界之间 97.5%。
+# 也就是说蒸馏拟合这一侧早就做完了，换多大骨干都压不动（BigCNN 6.34M→0.8618、
+# 9.55M→待测、Wide 6.86M→0.8600，全在噪声里）。
+# 但逐关看，难关的**下界本身就高**（4-3 1.068 / 5-3 1.030 / 2-2 0.901，
+# 而 1-1 只有 0.194）——老师在难关自己就犹豫，概率很散。
+# 而推理走 argmax，那些散开的质量根本用不上。软蒸馏却逼学生精确复刻这份犹豫，
+# 等于把容量花在推理阶段会被丢掉的信息上。锐化就是把预算挪回"选哪个动作"。
+# ⚠️ 锐化会改变 loss 的下界，所以 v38/v39 的 loss 数值**不能**跟 v32 比大小，
+#    只能比逐关通关率。
+TEMP = float(os.environ.get("MARIO_TEMP", "1"))
+if TEMP != 1.0:
+    if TEMP <= 0:
+        probs_gpu = th.nn.functional.one_hot(probs_gpu.argmax(1), probs_gpu.shape[1]).float()
+        print(">>> 目标锐化：T=0 → 老师 argmax 的硬标签", flush=True)
+    else:
+        probs_gpu = probs_gpu.clamp_min(1e-9).pow(1.0 / TEMP)
+        probs_gpu /= probs_gpu.sum(1, keepdim=True)
+        print(f">>> 目标锐化：T={TEMP}", flush=True)
+    _h = float(-(probs_gpu * th.log(probs_gpu.clamp_min(1e-9))).sum(1).mean())
+    print(f">>> 锐化后下界 FLOOR = {_h:.4f}（原始 0.8346）", flush=True)
+
 dummy = make_stub_env()                                    # 只借形状，不跑模拟器
 if RESUME:
     student = PPO.load(f"{OUT}.zip", device=DEVICE); print(f">>> 从 {OUT}.zip 续训", flush=True)
