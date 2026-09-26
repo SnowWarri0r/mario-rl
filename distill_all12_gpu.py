@@ -14,6 +14,13 @@ import torch as th
 from stable_baselines3 import PPO
 from stub_env import make_stub_env
 from wide_cnn import WideNatureCNN
+from impala_cnn import ImpalaCNN
+# MARIO_BACKBONE=impala → 换更大的残差骨干。依据：四代学生数据量涨 3.3 倍而训练 loss
+# 只从 0.8859 挪到 0.8570，连训练集都拟合不动＝容量限制；且 WideNatureCNN 的参数
+# 95% 压在最后一个 Linear 上、卷积只占 4.5%，对要空间精度的任务分配是反的。
+BACKBONE = os.environ.get("MARIO_BACKBONE", "wide")
+_EXTRACTOR = ImpalaCNN if BACKBONE == "impala" else WideNatureCNN
+_EXTRA = dict(scale=int(os.environ.get("MARIO_SCALE", "64"))) if BACKBONE == "impala" else {}
 
 EPOCHS = int(sys.argv[1]) if len(sys.argv) > 1 else 32
 OUT = sys.argv[2] if len(sys.argv) > 2 else "mario_all12_wide"
@@ -42,7 +49,7 @@ for f in files:
 N = sum(n for _, n in metas)
 gb = N * 4 * 84 * 84 / 2**30
 print(f">>> 数据 {'+'.join(d.strip() for d in DATA_DIRS)} 共 {N} 条 | obs {gb:.1f}GB "
-      f"| WideNatureCNN(686万参) | {EPOCHS} epochs | batch {BATCH}", flush=True)
+      f"| {type(student.policy.features_extractor).__name__}({sum(p.numel() for p in student.policy.parameters())/1e6:.1f}M参) | {EPOCHS} epochs | batch {BATCH}", flush=True)
 
 # MARIO_HOST_OBS=1：obs 留在**主机内存**（pinned），每个 batch 现传。
 # 为什么要这条退路：共享服务器的卡经常被别人占满（装不下 28GB 的 obs），
@@ -71,8 +78,8 @@ if RESUME:
     student = PPO.load(f"{OUT}.zip", device=DEVICE); print(f">>> 从 {OUT}.zip 续训", flush=True)
 else:
     student = PPO("CnnPolicy", dummy, device=DEVICE, n_steps=64, verbose=0,
-                  policy_kwargs=dict(features_extractor_class=WideNatureCNN,
-                                     features_extractor_kwargs=dict(features_dim=1024),
+                  policy_kwargs=dict(features_extractor_class=_EXTRACTOR,
+                                     features_extractor_kwargs=dict(features_dim=1024, **_EXTRA),
                                      normalize_images=DOUBLE_NORM))  # 正常=False：WideNatureCNN 自己 /255，别让 sb3 再除一次
 if DOUBLE_NORM:
     print(">>> 消融模式：normalize_images=True，输入会被 /255 两次（复现八关合并当年的 handicap）", flush=True)
