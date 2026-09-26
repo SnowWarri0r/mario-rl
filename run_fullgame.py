@@ -97,6 +97,10 @@ def play(run_id):
 
 def main():
     n = 1 if MODE == "det" else RUNS                    # det 每次一样，跑一局就够
+    # MODE=detj：全程 argmax（死后也不改采样），靠进关 + 复活时重抖相位来防复读。
+    if MODE == "detj":
+        assert os.environ.get("MARIO_REJITTER") and os.environ.get("MARIO_REJITTER_ON_DEATH") == "1", \
+            "detj 全程 argmax，没有进关+复活重抖就是 96 局同一条轨迹"
     print(f"=== 完整游戏 {MODEL} · 打法 {MODE} · {n} 局 ===", flush=True)
     with ProcessPoolExecutor(max_workers=min(n, 48)) as pool:
         results = list(pool.map(play, range(n)))

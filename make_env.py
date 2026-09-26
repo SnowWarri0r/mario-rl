@@ -53,6 +53,12 @@ STICKY_P = float(os.environ.get("MARIO_STICKY", "0"))
 REJITTER = int(os.environ.get("MARIO_REJITTER", "0"))
 # MARIO_REJITTER_STAGES="2-2,2-3" → 只对这些关重抖（不设＝全开，而全开是有害的，见类注释）
 REJITTER_STAGES = [x for x in os.environ.get("MARIO_REJITTER_STAGES", "").split(",") if x]
+# MARIO_REJITTER_ON_DEATH=1 → 掉命复活后也重抖相位（幅度同 MARIO_REJITTER）。
+# 为什么：连打里死一次后原本改用**采样**重试，防的是 argmax 在确定性模拟器里复读同一条死亡轨迹。
+# 但采样在不少关远差于 argmax（单命实测 SWA：1-3 argmax 29/31 vs 采样 5/31，3-3 31/31 vs 0/31），
+# 于是一次失手就变成采样在那一关连续送命 —— 1-3 在 96 局里耗掉 51 条命就是这么来的。
+# 复活时打乱相位同样能防复读，而且保留强得多的 argmax。
+REJITTER_ON_DEATH = os.environ.get("MARIO_REJITTER_ON_DEATH") == "1"
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -164,9 +170,11 @@ class RejitterOnStageChange(gym.Wrapper):
     ⚠️ 空按发生在新关出生点 x≈40 附近，那里没有威胁（这一点跟 prime 那套的结论一致）。
     """
 
-    def __init__(self, env, max_noop=30, seed=None, stages=None):
+    def __init__(self, env, max_noop=30, seed=None, stages=None, on_death=False):
         super().__init__(env)
         self.max_noop = max_noop
+        self.on_death = on_death
+        self._life = None
         self.rng = np.random.default_rng(seed)
         self._ws = None
         # ⚠️ 必须能按关卡开关：全局开是**有害的**。实测 N=96，全局重抖几乎帮了所有下游关
@@ -177,13 +185,18 @@ class RejitterOnStageChange(gym.Wrapper):
 
     def reset(self, **kw):
         self._ws = None
+        self._life = None
         return self.env.reset(**kw)
 
     def step(self, a):
         o, r, term, trunc, info = self.env.step(a)
         ws = (info.get("world"), info.get("stage"))
         hit = self.stages is None or (ws[0] and f"{ws[0]}-{ws[1]}" in self.stages)
-        if self._ws is not None and ws[0] and ws != self._ws and hit and not (term or trunc):
+        lf = info.get("life")
+        # 掉命那一步 info 已经是复活后的状态（出生点/中点），这时空按就是在复活点打乱相位
+        died = (self.on_death and self._life is not None and lf is not None and lf < self._life)
+        self._life = lf
+        if self._ws is not None and ws[0] and (ws != self._ws or died) and hit and not (term or trunc):
             for _ in range(int(self.rng.integers(0, self.max_noop + 1))):
                 o, r2, term, trunc, info = self.env.step(0)
                 r += r2
@@ -332,8 +345,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
     if STICKY_P:
         env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
     if REJITTER:
-        env = RejitterOnStageChange(env, max_noop=REJITTER,
-                                    stages=REJITTER_STAGES)   # 也要在跳帧之前
+        env = RejitterOnStageChange(env, max_noop=REJITTER, stages=REJITTER_STAGES,
+                                    on_death=REJITTER_ON_DEATH)   # 也要在跳帧之前
     env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
     if CROP_HUD if crop is None else crop:
         env = CropHUD(env)
