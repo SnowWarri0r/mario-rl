@@ -30,11 +30,15 @@ import glob, re as _re
 _spec = sys.argv[1] if len(sys.argv) > 1 else "mario_w4.zip"
 if os.path.isdir(_spec):
     MODELS = sorted(glob.glob(f"{_spec}/*.zip"),
-                    key=lambda p: int(_re.search(r"(\d+)_steps", p).group(1)))
+                    key=lambda p: int(_re.search(r"(\d+)(?:_steps|\.zip$)", p).group(1)))
 else:
     MODELS = [x for x in _spec.split(",") if x]
 STAGES = (sys.argv[2] if len(sys.argv) > 2 else "4-1,4-2,4-3").split(",")
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 31
+# MARIO_PHASE0：相位起点。挑档时必须把相位切成两半——在前一半上选，在后一半上验。
+# 不切就是**在评测集上选最大值**：25 个档各抽一次，最高的那个有相当一部分是运气，
+# 报出去会系统性高估（胜者诅咒）。
+PHASE0 = int(os.environ.get("MARIO_PHASE0", "0"))
 WORKERS = int(sys.argv[4]) if len(sys.argv) > 4 else 40
 NOOP = int(os.environ.get("MARIO_NOOP", "30"))
 DET = os.environ.get("MARIO_DET") == "1"
@@ -85,7 +89,7 @@ def run(job):
 
 def main():
     import wide_cnn, big_cnn, impala_cnn  # noqa: F401  注册全部骨干类，PPO.load 按 zip 里存的类名找
-    jobs = [(m, st, k) for m in MODELS for st in STAGES for k in range(N)]
+    jobs = [(m, st, k) for m in MODELS for st in STAGES for k in range(PHASE0, PHASE0 + N)]
     print(f"=== 推进深度 | {len(MODELS)} 个档 × {len(STAGES)} 关 | "
           f"{'argmax' if DET else '采样'} | 每格 {N} 个确切相位 | 上限 {MAXSTEP} 步"
           f"{' | 单命口径' if ONE_LIFE else ' | 三命(game over)口径'} ===", flush=True)

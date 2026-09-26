@@ -41,6 +41,7 @@ DOUBLE_NORM = os.environ.get("MARIO_DOUBLE_NORM") == "1"
 # 数据范围开关：MARIO_DATA_DIRS="distill_data,distill_data_w2" → 只喂八关那份(730k)，
 # 用来把"数据多样性"从"epoch 数"里摘出来单独称重。默认三个世界全喂。
 DATA_DIRS = os.environ.get("MARIO_DATA_DIRS", "distill_data,distill_data_w2,distill_data_w3").split(",")
+DENSE_FROM = int(os.environ.get("MARIO_DENSE_FROM", "999"))  # 从第几个 epoch 起逐档存
 SAVE_EVERY = 8                                             # 中途也存一份，长跑被抢卡不至于全丢
 
 assert th.cuda.is_available(), "没有可用 CUDA —— 先确认这台机器的卡是真空的（nvidia-smi 显存 ≠ CUDA 可用）"
@@ -220,6 +221,13 @@ while ep < EPOCHS:
         continue
 
     ep += 1
+    # 密集存档：loss 贴到下界之后就分辨不出档位好坏了 —— v32 从 epoch 20 到 32 只动 0.002，
+    # 而 0.0027 的 loss 差距对应的实战差异能有 12/868。老师那边早证过各关峰值不同步
+    # （W4 最终档把 4-2 从 0/31 拉到 23，同时把 4-1 从 21 摔到 9），处方是密集存档 + 按实测挑。
+    # 学生一直只取最终档，等于白白丢掉这一档抽奖。
+    if ep >= DENSE_FROM:
+        os.makedirs(f"ckpt_{OUT}", exist_ok=True)
+        student.save(f"ckpt_{OUT}/{OUT}_ep{ep:02d}")
     if ep % SAVE_EVERY == 0 and ep < EPOCHS:
         student.save(OUT); print(f"    …中途存档 {OUT}.zip", flush=True)
 
