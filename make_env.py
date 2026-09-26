@@ -385,6 +385,53 @@ def make_env_single():
     return make_env(stages=[os.environ["MARIO_STAGE"]])
 
 
+class FishDanger(gym.Wrapper):
+    """训练时用 RAM 给"处在飞鱼/墨鱼横带里、且鱼就在前方"扣分。推理时不用，网络只看像素。
+
+    依据（diag_22_deaths.py，121 相位单命）：2-2 老师死亡里飞鱼 31/41、墨鱼 4；飞鱼只往左游，
+    在出生高度 ±15 摆动（smbdis.asm MoveSwimmingCheepCheep），实测高度差 15 像素就会相撞。
+    ⚠️ 推理时用 RAM 接管（expert_22.py）已证否：所有变体都比老师差——横插一脚会打乱老师自己的提前量。
+    这里改成只进奖励，让它用自己的操控方式学会离开横带。
+    加在跳帧之外：每个智能体步算一次。
+
+    ⚠️ 结果：**证否**（2026-09-29）。从 22robust 续训（相位 0-120、熵 0、lr 1e-5），121 相位单命：
+       对照（惩罚 0）   80 → 74 / 40 / 21 / 14（25/50/75/100 万步）——复现"一续训就退化"
+       惩罚 ×4          80 → 81 /  0 /  0 /  0 ——惩罚把它推进退化行为，塌得更快
+       两臂一起退化 ⇒ 问题在续训本身，这个奖励信号救不了。"""
+
+    def __init__(self, env, pen=1.0, look=48, band=20):
+        super().__init__(env)
+        self.pen, self.look, self.band = pen, look, band
+        self._n = None
+
+    def reset(self, **kw):
+        out = self.env.reset(**kw)
+        self._n = _nes_of(self.env)
+        return out
+
+    def step(self, a):
+        o, r, term, trunc, info = self.env.step(a)
+        ram = self._n.ram
+        mx = int(ram[0x6D]) * 256 + int(ram[0x86]); my = int(ram[0xCE])
+        worst = 0.0
+        for i in range(5):
+            if ram[0x0F + i] and int(ram[0x16 + i]) in (0x07, 0x0A, 0x0B):
+                dx = int(ram[0x6E + i]) * 256 + int(ram[0x87 + i]) - mx
+                dy = int(ram[0xCF + i]) - my
+                if -8 <= dx <= self.look and abs(dy) < self.band:
+                    worst = max(worst, 1.0 - max(dx, 0) / self.look)
+        if worst:
+            r -= self.pen * worst
+            info["fish_danger"] = worst
+        return o, r, term, trunc, info
+
+
+def make_env_single_fish():
+    """单关 + 飞鱼危险惩罚：`MARIO_STAGE=2-2 MARIO_FISH_PEN=1.0 train_world_noop.py single_fish`"""
+    return FishDanger(make_env(stages=[os.environ["MARIO_STAGE"]]),
+                      pen=float(os.environ.get("MARIO_FISH_PEN", "1.0")))
+
+
 # 单关 2-3 专家训练用：2-3 是最后一个还停在 84% 的关，两次判"保留原版"用的都是 750k 起步的粗档，
 # 而 1-2 已经证明真峰值常在 10 万-40 万步之间——那一段过去从来没看过。
 def make_env_stage23():

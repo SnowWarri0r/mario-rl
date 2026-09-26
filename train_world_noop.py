@@ -17,7 +17,7 @@ from stable_baselines3.common.utils import get_schedule_fn
 from make_env import (make_env_world1, make_env_world2_land, make_env_world3,
                       make_env_stage21, make_env_stage13, make_env_stage12,
                       make_env_stage23, make_env_single, make_env_multi,
-                      make_env_maze, make_env_shaped, make_env_44bottom, NOOP_JITTER)
+                      make_env_maze, make_env_shaped, make_env_44bottom, make_env_single_fish, NOOP_JITTER)
 
 DEVICE = os.environ.get("MARIO_DEVICE", "cpu")
 OUT = os.environ.get("MARIO_OUT", "mario_w1noop")
@@ -41,6 +41,7 @@ def main():
                "s12": make_env_stage12,
                "s23": make_env_stage23,
                "single": make_env_single,          # 配 MARIO_STAGE=2-4
+               "single_fish": make_env_single_fish,  # 2-2：训练时用 RAM 给"在飞鱼横带里"扣分
                "multi": make_env_multi,           # 配 MARIO_STAGES=4-1,4-2,4-3
                "maze": make_env_maze,             # 配 MARIO_STAGE=4-4，换 max-x 势能奖励
                "maze44b": make_env_44bottom,      # 4-4 第二段专项：从底路入口开局（入口动作是脚本）
