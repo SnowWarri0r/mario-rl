@@ -48,8 +48,13 @@ def work(wid):
     def teacher(stage):
         if stage not in teachers:
             ok = stage in T.TEACHERS and T.TEACHERS[stage][1] >= MINSCORE
-            teachers[stage] = PPO.load(T.path(stage), device="cpu") if ok else None
+            if ok and T.is_state_expert(stage):          # 4-4：状态专家，要读 RAM
+                from expert_44 import Expert44
+                teachers[stage] = Expert44()
+            else:
+                teachers[stage] = PPO.load(T.path(stage), device="cpu") if ok else None
         return teachers[stage]
+    from make_env import _nes_of
 
     env = make_env()                                     # stages=None → 完整游戏
     buf = collections.defaultdict(lambda: ([], []))
@@ -65,7 +70,9 @@ def work(wid):
             with th.no_grad():
                 d = st.policy.get_distribution(ot).distribution
                 a = int(d.sample()[0]) if sto else int(d.probs.argmax())
-                if t is not None:
+                if t is not None and T.is_state_expert(stage):
+                    tp = t.probs(o, _nes_of(env).ram)    # 专家的底层标志靠逐步调用维护
+                elif t is not None:
                     tp = t.policy.get_distribution(ot).distribution.probs.cpu().numpy()[0]
             if t is not None:                            # 存学生走到的状态 + 老师在那儿的意见
                 b = buf[stage]; b[0].append(o.astype(np.uint8)); b[1].append(tp.astype(np.float32))
@@ -78,6 +85,10 @@ def work(wid):
             life = lf
             if (w, s) != ws:
                 cleared += 1; ws = (w, s); sto = False
+                if T.is_state_expert(f"{w}-{s}"):            # 进 4-4：专家的"已进底层"标志清零
+                    t4 = teacher(f"{w}-{s}")
+                    if t4 is not None:
+                        t4.reset()
             if term or trunc or n >= PER:
                 break
         games += 1; stages_cleared.append(cleared)

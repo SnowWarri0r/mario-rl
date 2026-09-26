@@ -87,7 +87,8 @@ def main():
     os.makedirs(OUTDIR, exist_ok=True)
     assert NOOP, "DAgger 也要在抖动分布上收，否则收的是固定相位下的漂移"
     sc = student_scores(EVAL_LOG)
-    stages = [s for s in sc if s in T.TEACHERS and T.TEACHERS[s][1] >= 40]
+    # 4-4 的老师是状态专家（要读 RAM、有状态），不能 PPO.load；它的数据走 collect_44.py
+    stages = [s for s in sc if s in T.TEACHERS and T.TEACHERS[s][1] >= 40 and not T.is_state_expert(s)]
     # 权重 = 学生离满分的距离，强关留地板值
     w = {s: max(FLOOR, round(100 - sc[s])) for s in stages}
     wsum = sum(w.values())
