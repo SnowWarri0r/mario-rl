@@ -38,7 +38,7 @@ def play(run_id):
     import torch as th; th.set_num_threads(1)
     from stable_baselines3 import PPO
     from make_env import make_env
-    import wide_cnn  # noqa: F401
+    import wide_cnn, big_cnn, impala_cnn  # noqa: F401  注册全部骨干类，PPO.load 按 zip 里存的类名找
 
     model = PPO.load(MODEL, device="cpu")
     env = make_env()                                    # stages=None → 完整游戏，过关自动接下一关

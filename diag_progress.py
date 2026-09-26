@@ -52,7 +52,7 @@ def run(job):
     import torch as th; th.set_num_threads(1)
     from stable_baselines3 import PPO
     from make_env import make_env
-    import wide_cnn  # noqa: F401
+    import wide_cnn, big_cnn, impala_cnn  # noqa: F401  注册全部骨干类，PPO.load 按 zip 里存的类名找
 
     model = PPO.load(model_path, device="cpu")
     # 相位就是有效样本量：argmax + 确定性模拟器下，同一相位每次都是同一条轨迹。
@@ -84,7 +84,7 @@ def run(job):
 
 
 def main():
-    import wide_cnn  # noqa: F401
+    import wide_cnn, big_cnn, impala_cnn  # noqa: F401  注册全部骨干类，PPO.load 按 zip 里存的类名找
     jobs = [(m, st, k) for m in MODELS for st in STAGES for k in range(N)]
     print(f"=== 推进深度 | {len(MODELS)} 个档 × {len(STAGES)} 关 | "
           f"{'argmax' if DET else '采样'} | 每格 {N} 个确切相位 | 上限 {MAXSTEP} 步"
