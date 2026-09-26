@@ -48,6 +48,9 @@ STACK_FRAMES = int(os.environ.get("MARIO_STACK", "4"))
 # no-op starts 只扰动开局，sticky 在整个回合里持续注入扰动——我们的病灶正是"策略跟敌人逐帧锁死"，
 # 这是直接治它的那味药。训练时开了，学出来的策略就不可能再依赖逐帧对齐。
 STICKY_P = float(os.environ.get("MARIO_STICKY", "0"))
+# MARIO_REJITTER=30 → 连打中每次进新关都重新抖 0-30 帧相位。用来检验
+# "连打落差是不是因为进关相位不均匀"，只在完整游戏口径下有意义。
+REJITTER = int(os.environ.get("MARIO_REJITTER", "0"))
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -142,6 +145,44 @@ class NoopReset(gym.Wrapper):
                 o, info = self.env.reset(**kw)
                 break
         return o, info
+
+
+# --- 积木 A4：过关时重新抖相位（只在连打里有意义）---
+class RejitterOnStageChange(gym.Wrapper):
+    """检测到进入新关，就再空按 0~k 个**模拟器帧**，把新关的相位重新随机化。
+
+    为什么要有这个开关：单关评测是 31 个相位**均匀枚举**，而连打进关的相位
+    由"上一关走了多久"决定，**不是均匀分布**。如果它系统性地落在少数几个坏相位上，
+    就能解释"单关 97-100% 而连打只有 57-79%"这个落差。
+    这个假设在十二关时代查不了——那时拿 v10 测，它在那些关每个相位都 100%，
+    一个全对的模型证明不了相位有没有影响。现在 v32 不是满分了（1-3 是 30/31），
+    才有条件做这个干预实验。
+
+    ⚠️ 必须挂在 SkipFrame **之下**：相位是单帧粒度的，隔着跳帧抖不出来。
+    ⚠️ 空按发生在新关出生点 x≈40 附近，那里没有威胁（这一点跟 prime 那套的结论一致）。
+    """
+
+    def __init__(self, env, max_noop=30, seed=None):
+        super().__init__(env)
+        self.max_noop = max_noop
+        self.rng = np.random.default_rng(seed)
+        self._ws = None
+
+    def reset(self, **kw):
+        self._ws = None
+        return self.env.reset(**kw)
+
+    def step(self, a):
+        o, r, term, trunc, info = self.env.step(a)
+        ws = (info.get("world"), info.get("stage"))
+        if self._ws is not None and ws[0] and ws != self._ws and not (term or trunc):
+            for _ in range(int(self.rng.integers(0, self.max_noop + 1))):
+                o, r2, term, trunc, info = self.env.step(0)
+                r += r2
+                if term or trunc:
+                    break
+        self._ws = ws
+        return o, r, term, trunc, info
 
 
 # --- 积木 A3：sticky actions。以概率 p 重复上一个动作 ---
@@ -282,6 +323,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
         env = NoopReset(env, max_noop=k, exact=exact)   # 单帧粒度地抖相位，要放在跳帧之前
     if STICKY_P:
         env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
+    if REJITTER:
+        env = RejitterOnStageChange(env, max_noop=REJITTER)   # 也要在跳帧之前
     env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
     if CROP_HUD if crop is None else crop:
         env = CropHUD(env)
