@@ -39,6 +39,12 @@ WORKERS = int(sys.argv[4]) if len(sys.argv) > 4 else 40
 NOOP = int(os.environ.get("MARIO_NOOP", "30"))
 DET = os.environ.get("MARIO_DET") == "1"
 MAXSTEP = int(os.environ.get("MARIO_MAXSTEP", "3000"))
+# MARIO_ONE_LIFE=1 → 第一次丢命就结束这一局。
+# 为什么要有这个口径：默认的 done 是 game over，等于**默许三次尝试**。
+# 连打里走到中后段时命常常已经在前面耗光，只剩一次机会，两边口径根本不同。
+# 实测 v32 的 2-4 单关 87%、连打只有 45%：若三次 87%，单次约 1-(1-p)^3=0.87 → p≈49%，
+# 跟 45% 几乎吻合 —— 所以"单关分"可能系统性高估了连打能力。
+ONE_LIFE = os.environ.get("MARIO_ONE_LIFE") == "1"
 
 
 def run(job):
@@ -56,7 +62,7 @@ def run(job):
     env = make_env(stages=[stage], noop=seed, exact=True)
     w0, s0 = (int(x) for x in stage.split("-"))
     o, _ = env.reset()
-    mx, cleared = 0, False
+    mx, cleared, life0 = 0, False, None
     for _ in range(MAXSTEP):
         ot, _ = model.policy.obs_to_tensor(o)
         with th.no_grad():
@@ -66,6 +72,11 @@ def run(job):
         mx = max(mx, int(info.get("x_pos", 0)))
         if info.get("flag_get") or (info.get("world"), info.get("stage")) != (w0, s0):
             cleared = True; break
+        life = info.get("life")
+        if ONE_LIFE and life is not None and life0 is not None and life < life0:
+            break                       # 丢了第一条命就收场
+        if life0 is None:
+            life0 = life
         if term or trunc:
             break
     env.close()
@@ -76,7 +87,8 @@ def main():
     import wide_cnn  # noqa: F401
     jobs = [(m, st, k) for m in MODELS for st in STAGES for k in range(N)]
     print(f"=== 推进深度 | {len(MODELS)} 个档 × {len(STAGES)} 关 | "
-          f"{'argmax' if DET else '采样'} | 每格 {N} 个确切相位 | 上限 {MAXSTEP} 步 ===", flush=True)
+          f"{'argmax' if DET else '采样'} | 每格 {N} 个确切相位 | 上限 {MAXSTEP} 步"
+          f"{' | 单命口径' if ONE_LIFE else ' | 三命(game over)口径'} ===", flush=True)
     res = {(m, st): [] for m in MODELS for st in STAGES}
     clr = {(m, st): 0 for m in MODELS for st in STAGES}
     with ProcessPoolExecutor(max_workers=min(len(jobs), WORKERS)) as pool:

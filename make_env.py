@@ -51,6 +51,8 @@ STICKY_P = float(os.environ.get("MARIO_STICKY", "0"))
 # MARIO_REJITTER=30 → 连打中每次进新关都重新抖 0-30 帧相位。用来检验
 # "连打落差是不是因为进关相位不均匀"，只在完整游戏口径下有意义。
 REJITTER = int(os.environ.get("MARIO_REJITTER", "0"))
+# MARIO_REJITTER_STAGES="2-2,2-3" → 只对这些关重抖（不设＝全开，而全开是有害的，见类注释）
+REJITTER_STAGES = [x for x in os.environ.get("MARIO_REJITTER_STAGES", "").split(",") if x]
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -162,11 +164,16 @@ class RejitterOnStageChange(gym.Wrapper):
     ⚠️ 空按发生在新关出生点 x≈40 附近，那里没有威胁（这一点跟 prime 那套的结论一致）。
     """
 
-    def __init__(self, env, max_noop=30, seed=None):
+    def __init__(self, env, max_noop=30, seed=None, stages=None):
         super().__init__(env)
         self.max_noop = max_noop
         self.rng = np.random.default_rng(seed)
         self._ws = None
+        # ⚠️ 必须能按关卡开关：全局开是**有害的**。实测 N=96，全局重抖几乎帮了所有下游关
+        # （2-2 36→53、2-3 77→91、2-4 67→81），却把 1-3 从 100% 砸到 77%，
+        # 两边在"平均通关关数"上正好抵消（6.0 → 5.8），看聚合指标会误判成"相位无关"。
+        # 只对吃亏于自然相位的关开。stages=None 表示全开。
+        self.stages = set(stages) if stages else None
 
     def reset(self, **kw):
         self._ws = None
@@ -175,7 +182,8 @@ class RejitterOnStageChange(gym.Wrapper):
     def step(self, a):
         o, r, term, trunc, info = self.env.step(a)
         ws = (info.get("world"), info.get("stage"))
-        if self._ws is not None and ws[0] and ws != self._ws and not (term or trunc):
+        hit = self.stages is None or (ws[0] and f"{ws[0]}-{ws[1]}" in self.stages)
+        if self._ws is not None and ws[0] and ws != self._ws and hit and not (term or trunc):
             for _ in range(int(self.rng.integers(0, self.max_noop + 1))):
                 o, r2, term, trunc, info = self.env.step(0)
                 r += r2
@@ -324,7 +332,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
     if STICKY_P:
         env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
     if REJITTER:
-        env = RejitterOnStageChange(env, max_noop=REJITTER)   # 也要在跳帧之前
+        env = RejitterOnStageChange(env, max_noop=REJITTER,
+                                    stages=REJITTER_STAGES)   # 也要在跳帧之前
     env = SkipFrame(env, k=SKIP_FRAMES if skip is None else skip)
     if CROP_HUD if crop is None else crop:
         env = CropHUD(env)
