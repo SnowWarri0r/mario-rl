@@ -70,10 +70,19 @@ def main():
         # 用途：检验"在带扰动的环境里从头训，能学到随机应变而不是背时机"（配 MARIO_STICKY）。
         from stable_baselines3.common.utils import get_schedule_fn as _g  # noqa: F401
         from wide_cnn import WideNatureCNN
+        from impala_cnn import ImpalaCNN
         assert not os.environ.get("MARIO_BASE_VECN"), "从头训不该带旧的奖励归一化统计"
+        # MARIO_NET=impala → IMPALA 残差骨干（带 GroupNorm，见 impala_cnn.py），MARIO_SCALE 定通道（16 = 16/32/64/64）。
+        # 依据：Cobbe 等 Procgen（2019）里 IMPALA-CNN 对没见过的关卡泛化明显好于 Nature-CNN；
+        # 2-2 的短板正是"没见过的鱼群"。
+        if os.environ.get("MARIO_NET") == "impala":
+            fe_cls, fe_kw = ImpalaCNN, dict(features_dim=int(os.environ.get("MARIO_FDIM", "256")),
+                                            scale=int(os.environ.get("MARIO_SCALE", "16")))
+        else:
+            fe_cls, fe_kw = WideNatureCNN, dict(features_dim=1024)
         model = PPO("CnnPolicy", venv, device=DEVICE,
-                    policy_kwargs=dict(features_extractor_class=WideNatureCNN,
-                                       features_extractor_kwargs=dict(features_dim=1024),
+                    policy_kwargs=dict(features_extractor_class=fe_cls,
+                                       features_extractor_kwargs=fe_kw,
                                        normalize_images=False),
                     learning_rate=LR, n_steps=512, batch_size=256, n_epochs=4,
                     gamma=0.99, gae_lambda=0.95, ent_coef=0.02, clip_range=0.2, verbose=1)
