@@ -22,7 +22,10 @@ from concurrent.futures import ProcessPoolExecutor
 
 MODELS = sys.argv[1].split(",")
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 300
-# MARIO_SWAP13=<模型>：1-1/1-2 由主模型打，进 1-3 后换成这个模型（用来在连打条件下测单关老师/试点模型）
+# MARIO_ENTRY_STAGE：看哪一关的第一次尝试（默认 1-3；2-2 试点时设 2-2）
+ENTRY = tuple(int(x) for x in os.environ.get("MARIO_ENTRY_STAGE", "1-3").split("-"))
+ES = f"{ENTRY[0]}-{ENTRY[1]}"
+# MARIO_SWAP13=<模型>：进入 MARIO_ENTRY_STAGE 之前由主模型打，进关后换成这个模型（用来在连打条件下测单关老师/试点模型）
 SWAP13 = os.environ.get("MARIO_SWAP13")
 TAG = f"[SWAP13={os.path.basename(SWAP13) if SWAP13 else '-'}] [FLUSH={os.environ.get('MARIO_FLUSH','0')} PRIME={os.environ.get('MARIO_PRIME','0')}]"
 
@@ -50,7 +53,7 @@ def run(job):
             a = int(mm.policy.get_distribution(ot).distribution.probs.argmax())
         o, r, term, trunc, info = env.step(a); steps += 1
         ws = (info.get("world"), info.get("stage"))
-        if entry is None and ws == (1, 3):
+        if entry is None and ws == ENTRY:
             r_ = n.ram
             entry = dict(steps=steps, status=int(r_[0x0756]), fc=int(r_[0x09]),
                          timer=int(r_[0x07F8]) * 100 + int(r_[0x07F9]) * 10 + int(r_[0x07FA]))
@@ -59,11 +62,11 @@ def run(job):
             x = prevx
             env.close()
             if entry is None:
-                return model, "没到1-3", None, None
-            return model, "1-3 第一次尝试死", entry, x
+                return model, "没到", None, None
+            return model, "第一次尝试死", entry, x
         prevx = int(n.ram[0x6D]) * 256 + int(n.ram[0x86])
-        if entry is not None and ws != (1, 3):
-            env.close(); return model, "1-3 一次过", entry, None
+        if entry is not None and ws != ENTRY:
+            env.close(); return model, "一次过", entry, None
     env.close()
     return model, "步数上限", entry, None
 
@@ -77,14 +80,14 @@ def main():
     for model in MODELS:
         rs = agg[model]
         c = collections.Counter(o for o, _, _ in rs)
-        reach = c["1-3 第一次尝试死"] + c["1-3 一次过"]
+        reach = c["第一次尝试死"] + c["一次过"]
         print(f"\n=== {os.path.basename(model)} {TAG}：{dict(c)}")
         if reach:
-            print(f"   到了 1-3 的 {reach} 局里，第一次尝试失败 {c['1-3 第一次尝试死']} 局"
-                  f" = {c['1-3 第一次尝试死']/reach*100:.1f}%")
-        xs = sorted(x for o, _, x in rs if o == "1-3 第一次尝试死")
+            print(f"   到了 {ES} 的 {reach} 局里，第一次尝试失败 {c['第一次尝试死']} 局"
+                  f" = {c['第一次尝试死']/reach*100:.1f}%")
+        xs = sorted(x for o, _, x in rs if o == "第一次尝试死")
         print(f"   死亡 x：{xs}")
-        for label in ("1-3 一次过", "1-3 第一次尝试死"):
+        for label in ("一次过", "第一次尝试死"):
             es = [e for o, e, _ in rs if o == label and e]
             if es:
                 st = collections.Counter(e["status"] for e in es)
