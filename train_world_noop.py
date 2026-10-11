@@ -64,7 +64,20 @@ def main():
     else:
         venv = VecNormalize(venv, norm_obs=False, norm_reward=True, clip_reward=10.0)
 
-    model = PPO.load(BASE_MODEL, env=venv, device=DEVICE)
+    if BASE_MODEL == "scratch":
+        # 从头训：用项目当年从零训练的超参（train_world1_big.py），骨干用学生同款 WideNatureCNN。
+        # 用途：检验"在带扰动的环境里从头训，能学到随机应变而不是背时机"（配 MARIO_STICKY）。
+        from stable_baselines3.common.utils import get_schedule_fn as _g  # noqa: F401
+        from wide_cnn import WideNatureCNN
+        assert not os.environ.get("MARIO_BASE_VECN"), "从头训不该带旧的奖励归一化统计"
+        model = PPO("CnnPolicy", venv, device=DEVICE,
+                    policy_kwargs=dict(features_extractor_class=WideNatureCNN,
+                                       features_extractor_kwargs=dict(features_dim=1024),
+                                       normalize_images=False),
+                    learning_rate=LR, n_steps=512, batch_size=256, n_epochs=4,
+                    gamma=0.99, gae_lambda=0.95, ent_coef=0.02, clip_range=0.2, verbose=1)
+    else:
+        model = PPO.load(BASE_MODEL, env=venv, device=DEVICE)
     # ⚠️ `PPO.load` 会把存档里的超参一起恢复，光赋值 `model.learning_rate` **完全无效**：
     # sb3 每次更新读的是 `self.lr_schedule(progress)`，那是从 zip 里 unpickle 出来的 callable。
     # 踩过：从「熵归零手术档」(lr=1e-5) warm-start 去学 World 4，banner 打印 lr 0.00025，

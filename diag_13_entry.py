@@ -22,7 +22,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 MODELS = sys.argv[1].split(",")
 RUNS = int(sys.argv[2]) if len(sys.argv) > 2 else 300
-TAG = f"[FLUSH={os.environ.get('MARIO_FLUSH','0')} PRIME={os.environ.get('MARIO_PRIME','0')}]"
+# MARIO_SWAP13=<模型>：1-1/1-2 由主模型打，进 1-3 后换成这个模型（用来在连打条件下测单关老师/试点模型）
+SWAP13 = os.environ.get("MARIO_SWAP13")
+TAG = f"[SWAP13={os.path.basename(SWAP13) if SWAP13 else '-'}] [FLUSH={os.environ.get('MARIO_FLUSH','0')} PRIME={os.environ.get('MARIO_PRIME','0')}]"
 
 
 def run(job):
@@ -32,6 +34,7 @@ def run(job):
     from make_env import make_env, _nes_of
     import wide_cnn, big_cnn, impala_cnn  # noqa: F401
     m = PPO.load(model, device="cpu")
+    m13 = PPO.load(SWAP13, device="cpu") if SWAP13 else m
     env = make_env()
     env.unwrapped._e  # noqa
     o, _ = env.reset(seed=seed); n = _nes_of(env)
@@ -41,9 +44,10 @@ def run(job):
     steps, entry, prevx = 0, None, 0
     life0 = int(n.ram[0x075A])
     for _ in range(12000):
-        ot, _ = m.policy.obs_to_tensor(o)
+        mm = m13 if entry is not None else m          # 进了 1-3 才换人
+        ot, _ = mm.policy.obs_to_tensor(o)
         with th.no_grad():
-            a = int(m.policy.get_distribution(ot).distribution.probs.argmax())
+            a = int(mm.policy.get_distribution(ot).distribution.probs.argmax())
         o, r, term, trunc, info = env.step(a); steps += 1
         ws = (info.get("world"), info.get("stage"))
         if entry is None and ws == (1, 3):
