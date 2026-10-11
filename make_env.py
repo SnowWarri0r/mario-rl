@@ -904,6 +904,40 @@ class ArchiveStart(gym.Wrapper):
         return self.env.reset(**kw)              # 都失败就老老实实从头开始
 
 
+def make_env_22dodge():
+    """2-2 · 躲鱼专练：一部分环境从鱼群路段的存档开局，每局都换一套游戏随机数（MARIO_RNG_POOL）。
+
+    为什么：老师在没见过的鱼群下只有约五成（diag_22_rng.py），凶手死前在画面里待了 1 秒以上
+    （diag_22_visible.py），存档搜索的硬标签又不迁移（search_22.py）——缺的是"同一段路、不同鱼群"
+    的大量躲鱼练习。正常开局每局要先游几百步才进鱼群，存档开局把预算集中到 x 900-3000。
+    同一个存档点每局换随机数 ⇒ 之后刷出来的鱼都不一样（存档那一刻已在屏内的鱼除外）。
+    前缀来自 mario_22rngB 在相位 8 帧下的一次通关轨迹（prefixes22_dodge.npz，每 8 步切一刀）。
+    其余 1-p 的环境正常开局（空按 0-MARIO_NOOP），保住前半段。
+
+    结果（2026-10-10，未过预设标准）：D=本工厂、C=同配置正常开局（make_env_single），都从 B 续训 800 万步，
+    粘滞 0.25 / lr 1e-4 / ent 0.01。单关留出随机数（seed 5000）每档 121 局：D 43-70、C 52-73，两组都在
+    B（63）附近乱跳。挑出的档连打第一次进 2-2（各约 240 局）：D 128/244=52.5%、C 113/246=45.9%、
+    同批 B 109/239=45.6%（B 三批合计 351/728=48.2%）。D 比 B 约 +4pp（~1.2σ），未达 55%。
+    另：C 单关最高 73 进连打只有 45.9%——单关挑档对连打没有预测力。
+    """
+    path = os.environ.get("MARIO_ARCHIVE", "prefixes22_dodge.npz")
+    p = float(os.environ.get("MARIO_ARCHIVE_P", "0.75"))
+    assert RNG_POOL, "躲鱼专练要配 MARIO_RNG_POOL"
+    e = MarioBase(stages=["2-2"])
+    archive = np.random.default_rng().random() < p
+    if archive:
+        e = ArchiveStart(e, list(np.load(path, allow_pickle=True)["prefixes"]))
+    elif NOOP_JITTER:
+        e = NoopReset(e, max_noop=NOOP_JITTER)
+    e = RandomizeRNG(e)
+    if STICKY_P:
+        e = StickyActions(e)
+    e = SkipFrame(e, k=SKIP_FRAMES)
+    e = GrayResize(e, 84)
+    e = FrameStack(e, prime_on_reset=archive)
+    return e
+
+
 def make_env_stage22_archive():
     """2-2 · 存档起点 + 梯子塑形：MARIO_ARCHIVE 指向前缀文件，MARIO_ARCHIVE_P 控制存档开局的比例。"""
     path = os.environ.get("MARIO_ARCHIVE", "states22_prefixes.npz")
