@@ -17,11 +17,18 @@
 后两者和连打进关的 43.5% 对上（base vs 换随机数差约 3σ）。base→both 逐相位：过→过 33、过→死 47、死→过 24、死→死 17，
 同一个开局时机换了随机数就大面积翻转 → 老师背的是这一个随机数状态下的鱼群，病根坐实。
 
-用法: python diag_22_rng.py <模型> [相位数] [并发]
+续训试点（2026-10-09，未过预设标准）：从 22robust 热启动 800 万步，每次 reset 从池的偶数行写随机数
+（make_env.RandomizeRNG），A 只换随机数、B 再加粘滞 0.25，lr 1e-4 / ent 0.01 / 相位 0-120。
+留出奇数行挑档（老师 50/121）：A 最好 65（350 万步，档间 15-65 乱跳）、B 最好 67（750 万步，后 6 档 52-67）。
+连打第一次进 2-2（各 300 局）：老师 93/227=41.0%、A 106/244=43.4%、B 119/236=50.4%（B 比老师约 +2σ）。
+预设标准 ≥55% 未达。换随机数后 base≈both，背鱼群的问题没了，但在没见过的鱼群下躲鱼本身只有五成左右。
+
+用法: python diag_22_rng.py <模型逗号分隔> [相位数] [并发]   MARIO_ARMS=base,both 选组（默认三组）
 """
 import warnings; warnings.filterwarnings("ignore")
 import os, sys, collections
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+assert not os.environ.get("MARIO_RNG_POOL"), "评测脚本自己写随机数，别再让 make_env 写一遍（base 组会被污染）"
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
@@ -31,7 +38,7 @@ WORKERS = int(sys.argv[3]) if len(sys.argv) > 3 else 12
 RNG, FRAME = 0x07A7, 0x09
 
 
-POOL = "/tmp/rng22_pool.npy"
+POOL = os.environ.get("MARIO_RNG_EVAL_POOL", "rng22_pool.npy")   # 偶数行给训练（make_env.RandomizeRNG），这里只用奇数行
 
 
 def build_pool(frames=200_000, every=97):
@@ -47,16 +54,16 @@ def build_pool(frames=200_000, every=97):
 
 
 def run(job):
-    arm, phase = job
+    model, arm, phase = job
     import torch as th; th.set_num_threads(1)
     from stable_baselines3 import PPO
     from make_env import make_env, _nes_of
     import wide_cnn, big_cnn, impala_cnn  # noqa: F401
-    m = PPO.load(MODEL, device="cpu")
+    m = PPO.load(model, device="cpu")
     env = make_env(stages=["2-2"], noop=phase, exact=True)
     o, _ = env.reset(); n = _nes_of(env)
     if arm != "base":
-        pool = np.load(POOL)
+        pool = np.load(POOL)[1::2]
         row = pool[np.random.default_rng(1000 + phase).integers(len(pool))]
         n.ram[RNG:RNG + 7] = row[:7]
         assert list(n.ram[RNG:RNG + 7]) == list(row[:7]), "RAM 写不进去"
@@ -68,30 +75,26 @@ def run(job):
             a = int(m.policy.get_distribution(ot).distribution.probs.argmax())
         o, rew, term, trunc, info = env.step(a)
         if info.get("flag_get") or (info.get("world"), info.get("stage")) != (2, 2):
-            env.close(); return arm, phase, 1
+            env.close(); return model, arm, phase, 1
         if term or trunc:
-            env.close(); return arm, phase, 0
+            env.close(); return model, arm, phase, 0
     env.close()
-    return arm, phase, 0
+    return model, arm, phase, 0
 
 
 def main():
     if not os.path.exists(POOL):
         build_pool()
-    arms = ["base", "rng", "both"]
-    jobs = [(a, p) for a in arms for p in range(NPH)]
+    arms = os.environ.get("MARIO_ARMS", "base,rng,both").split(",")
+    models = MODEL.split(",")
+    jobs = [(m, a, p) for m in models for a in arms for p in range(NPH)]
     res = collections.defaultdict(dict)
     with ProcessPoolExecutor(max_workers=WORKERS) as pool:
-        for arm, phase, ok in pool.map(run, jobs, chunksize=1):
-            res[arm][phase] = ok
-    for arm in arms:
-        v = [res[arm][p] for p in range(NPH)]
-        print(f"{arm:5s} 通关 {sum(v)}/{NPH} = {sum(v)/NPH:.1%}")
-    b, r = res["base"], res["both"]
-    flips = collections.Counter((b[p], r[p]) for p in range(NPH))
-    print("base→both 逐相位 (过,过)/(过,死)/(死,过)/(死,死):",
-          flips[(1, 1)], flips[(1, 0)], flips[(0, 1)], flips[(0, 0)])
-
+        for model, arm, phase, ok in pool.map(run, jobs, chunksize=1):
+            res[(model, arm)][phase] = ok
+    for model in models:
+        line = "  ".join(f"{a} {sum(res[(model, a)].values())}/{NPH}" for a in arms)
+        print(f"{os.path.basename(model):40s} {line}", flush=True)
 
 if __name__ == "__main__":
     main()

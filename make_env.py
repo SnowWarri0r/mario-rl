@@ -59,6 +59,11 @@ REJITTER_STAGES = [x for x in os.environ.get("MARIO_REJITTER_STAGES", "").split(
 # 于是一次失手就变成采样在那一关连续送命 —— 1-3 在 96 局里耗掉 51 条命就是这么来的。
 # 复活时打乱相位同样能防复读，而且保留强得多的 argmax。
 REJITTER_ON_DEATH = os.environ.get("MARIO_REJITTER_ON_DEATH") == "1"
+# MARIO_RNG_POOL=<npy> → 每次 reset（空按之后）把游戏随机数 $07A7..$07AD 和帧计数器 $09 换成池里随机一行。
+# 池由 diag_22_rng.build_pool 让模拟器空跑采样（每行 7 字节随机数 + 1 字节帧计数器），只取偶数行，
+# 奇数行留给评测。为什么：单关环境每次进关随机数都一样，2-2 老师背下了那一套鱼群
+# （diag_22_rng.py：换随机数 66% → 41-47%）。连打进关时随机数取决于开机后总帧数，所以训练要见多套。
+RNG_POOL = os.environ.get("MARIO_RNG_POOL")
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -152,6 +157,22 @@ class NoopReset(gym.Wrapper):
             if term or trunc:                                # 极少见：空按到死，重开一次就好
                 o, info = self.env.reset(**kw)
                 break
+        return o, info
+
+
+class RandomizeRNG(gym.Wrapper):
+    """reset 后从状态池写入游戏随机数和帧计数器（见 MARIO_RNG_POOL 注释）。挂在 NoopReset 外面。"""
+    def __init__(self, env, pool=None, parity=0, seed=None):
+        super().__init__(env)
+        self.pool = np.load(pool or RNG_POOL)[parity::2]
+        self.rng = np.random.default_rng(seed)
+
+    def reset(self, **kw):
+        o, info = self.env.reset(**kw)
+        n = _nes_of(self)
+        row = self.pool[self.rng.integers(len(self.pool))]
+        n.ram[0x07A7:0x07AE] = row[:7]
+        n.ram[0x09] = row[7]
         return o, info
 
 
@@ -342,6 +363,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
     k = NOOP_JITTER if noop is None else noop
     if k:
         env = NoopReset(env, max_noop=k, exact=exact)   # 单帧粒度地抖相位，要放在跳帧之前
+    if RNG_POOL:
+        env = RandomizeRNG(env)              # 空按之后再写随机数，否则空按那几帧会把它推走
     if STICKY_P:
         env = StickyActions(env)             # 放在跳帧之前，按模拟器帧粘
     if REJITTER:
