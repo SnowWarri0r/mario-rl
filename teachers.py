@@ -25,7 +25,11 @@ TEACHERS = {
     "1-3": ("checkpoints_w1ent0/w1ent0_6250000_steps.zip",          100, 100),
     "1-4": ("mario_14robust.zip",                                   100, 100),
     "2-1": ("checkpoints_s21ent0/s21ent0_3500000_steps.zip",        100,  98),
-    "2-2": ("mario_22robust.zip",                                    84,  60),   # 唯一没收口的老关
+    # 2-2（2026-10-09 换档）：mario_22rngB.zip = 22robust 在"每局随机换游戏随机数 + 粘滞 0.25"下续训 750 万步
+    #   （diag_22_rng.py / make_env.RandomizeRNG）。旧档 22robust 只认得单关那一套随机数：
+    #   原样 66% / 换随机数 41%；B 原样 50% / 换随机数 52%（121 相位单命），
+    #   连打第一次进 2-2 通过 41.0-43.5% → 49.5%（489 局）。分数列记换随机数口径。
+    "2-2": ("mario_22rngB.zip",                                      52,  52),
     "2-3": ("mario_23robust.zip",                                    91,  91),
     "2-4": ("checkpoints_mario_24fine/mario_24fine_99840_steps.zip", 100, 100),
     "3-1": ("checkpoints_w3ent0/w3ent0_2250000_steps.zip",          100, 100),

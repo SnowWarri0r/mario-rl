@@ -51,6 +51,14 @@ assert np.__version__ < "2", f"当前 numpy {np.__version__} —— 换 numpy<2 
 print(f">>> GPU: {th.cuda.get_device_name(0)} | 显存 {th.cuda.get_device_properties(0).total_memory/2**30:.0f}GB", flush=True)
 
 files = [f for d in DATA_DIRS for f in sorted(glob.glob(f"{d.strip()}/*.npz"))]
+# MARIO_EXCLUDE=<正则>：按路径剔除文件。用途：换了某关老师后，旧老师打的那关标签整批剔掉，由重标的目录补上
+# （例：MARIO_EXCLUDE='(distill_data_29|dagger_fg2)/2-2_' + relabel_stage.py 产出的目录）。按路径而不是文件名，
+# 因为新一轮收的数据里同名的 2-2_*.npz 已经是新老师打的，不能一起剔。
+if os.environ.get("MARIO_EXCLUDE"):
+    import re
+    _ex = re.compile(os.environ["MARIO_EXCLUDE"])
+    _n0 = len(files); files = [f for f in files if not _ex.search(f)]
+    print(f">>> MARIO_EXCLUDE={os.environ['MARIO_EXCLUDE']} 剔除 {_n0 - len(files)} 个文件", flush=True)
 assert files, f"这些目录里没找到 npz：{DATA_DIRS}"
 metas = []
 for f in files:
