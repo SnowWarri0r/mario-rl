@@ -64,7 +64,7 @@ def run(job):
     o, _ = env.reset(); n = _nes_of(env)
     if arm != "base":
         pool = np.load(POOL)[1::2]
-        row = pool[np.random.default_rng(1000 + phase).integers(len(pool))]
+        row = pool[np.random.default_rng(int(os.environ.get("MARIO_EVAL_SEED", "1000")) + phase).integers(len(pool))]
         n.ram[RNG:RNG + 7] = row[:7]
         assert list(n.ram[RNG:RNG + 7]) == list(row[:7]), "RAM 写不进去"
         if arm == "both":
