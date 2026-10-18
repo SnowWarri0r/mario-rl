@@ -34,6 +34,11 @@ DET_STAGES = set(filter(None, os.environ.get(
     "MARIO_DET_STAGES", "1-4,2-1,2-2,2-4,3-1,3-2,3-3,3-4").split(",")))
 
 
+# MARIO_STAGE_MODELS="2-2=<模型>,..."：进这些关时改由指定模型操作（其余关仍是主模型），推理模式规则不变。
+# 用途：量"某关如果打到老师水平，连打能涨多少"的上限，也是"主网络 + 专关网络"方案本身。
+STAGE_MODELS = dict(kv.split("=", 1) for kv in filter(None, os.environ.get("MARIO_STAGE_MODELS", "").split(",")))
+
+
 def play(run_id):
     import torch as th; th.set_num_threads(1)
     from stable_baselines3 import PPO
@@ -41,6 +46,7 @@ def play(run_id):
     import wide_cnn, big_cnn, impala_cnn  # noqa: F401  注册全部骨干类，PPO.load 按 zip 里存的类名找
 
     model = PPO.load(MODEL, device="cpu")
+    special = {k: PPO.load(v, device="cpu") for k, v in STAGE_MODELS.items()}
     env = make_env()                                    # stages=None → 完整游戏，过关自动接下一关
     o, _ = env.reset()
     cleared, deaths, log = [], 0, []
@@ -61,7 +67,7 @@ def play(run_id):
     ws, life, sto_now = (1, 1), None, want_sto(1, 1)
     steps, prev_x, prev_time = 0, 0, None
     while steps < MAX_STEPS:
-        a, _ = model.predict(o, deterministic=not sto_now)
+        a, _ = special.get(f"{ws[0]}-{ws[1]}", model).predict(o, deterministic=not sto_now)
         o, r, term, trunc, info = env.step(int(a))
         steps += 1
         w, s = info.get("world", ws[0]), info.get("stage", ws[1])
