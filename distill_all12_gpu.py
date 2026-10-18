@@ -194,6 +194,11 @@ def _rebuild(sd):
     return st, th.optim.Adam(st.policy.parameters(), lr=LR)
 
 MAX_RESEED = int(os.environ.get("MARIO_MAX_RESEED", "5"))
+# MARIO_CLIP=0.5 → 梯度范数裁剪；MARIO_WARMUP=<步数> → 前若干步 lr 线性从 0 升到 LR。
+# ImpalaCNN 的蒸馏（s32）实测要 lr 1e-4 + warmup + 裁剪才不塌成常数解，默认都关，Wide 的老配方不变。
+CLIP = float(os.environ.get("MARIO_CLIP", "0"))
+WARMUP = int(os.environ.get("MARIO_WARMUP", "0"))
+_gstep = 0
 _reseeds = 0
 ep = 0
 while ep < EPOCHS:
@@ -207,7 +212,14 @@ while ep < EPOCHS:
         pb = probs_gpu[b.to(DEVICE)] if HOST_OBS else probs_gpu[b]
         log_q = student.policy.get_distribution(ob).distribution.logits
         loss = -(pb * log_q).sum(1).mean()        # soft policy distillation: -Σ p_老师·log q_学生
-        opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item() * len(b)
+        opt.zero_grad(); loss.backward()
+        if CLIP:
+            th.nn.utils.clip_grad_norm_(student.policy.parameters(), CLIP)
+        if WARMUP and _gstep <= WARMUP:
+            for g in opt.param_groups:
+                g["lr"] = LR * min(1.0, (_gstep + 1) / WARMUP)
+        _gstep += 1
+        opt.step(); tot += loss.item() * len(b)
     dt = time.time() - t0
     ep_loss = tot / N
     print(f"epoch {ep+1}/{EPOCHS}  loss {ep_loss:.4f}  {dt:.1f}s  ({N/dt/1000:.0f}k 帧/s)", flush=True)
