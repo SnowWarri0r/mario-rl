@@ -1,966 +1,968 @@
-# Mario RL — 一个网络通关《超级马里奥兄弟》多个世界
+English | [简体中文](README.zh-CN.md)
 
-用强化学习从零教 agent 玩 NES《超级马里奥兄弟》，从单关 PPO 起步，一路扩到 32 关：
-每关一个老师（迷宫 7-4 / 8-4 未解）蒸进只看像素的学生网络（一个主网络 + 一个 2-2 专关网络），完整游戏三条命连打平均 8.65 关，最好一局过 21 关（打到 6-2）。
-早期只到三个世界共 12 关。专家训练、蒸馏、单世界 student 全在一台 Mac 上跑（纯 CPU），
-只有最后的十二关大合并撞到内存墙，搬去一台 GPU 机器（详见下面「内存墙」）。
-记录了每一步的实验、翻车和修复。
+# Mario RL — one network clearing multiple worlds of *Super Mario Bros.*
 
-基于 [`gym-super-mario-bros`](https://github.com/Kautenja/gym-super-mario-bros) 模拟器
-+ [`stable-baselines3`](https://github.com/DLR-RM/stable-baselines3) 的 PPO。
+Teaching an agent to play NES *Super Mario Bros.* from scratch with reinforcement learning, starting from single-stage PPO and scaling all the way to 32 stages:
+one teacher per stage (mazes 7-4 / 8-4 unsolved), distilled into pixel-only student networks (one main network + one 2-2 stage-specific network). Full-game playthrough with three lives averages 8.65 stages; the best run cleared 21 stages (reaching 6-2).
+Early on it only covered three worlds, 12 stages in total. Expert training, distillation and single-world students all ran on one Mac (CPU only);
+only the final twelve-stage merge hit the memory wall and moved to a GPU machine (see "memory wall" below).
+Every experiment, failure and fix along the way is recorded here.
 
-## 成果
+Built on the [`gym-super-mario-bros`](https://github.com/Kautenja/gym-super-mario-bros) emulator
++ PPO from [`stable-baselines3`](https://github.com/DLR-RM/stable-baselines3).
 
-### 2026-09-23 → 10-14：目标从「逐关平均」换成「连打」（最新）
+## Results
 
-**主指标换了。** 单关 28 关平均涨到 90.6%（SWA），连打却纹丝不动（5.6 → 5.7 关）：单关平均给 8-3 和 2-2
-同样权重，可 2-2 挡住近七成的局、8-3 几乎没人走到。之后一律以**连打**为主口径：完整游戏、共用 3 条命、
-每次进新关重抖相位（`MARIO_REJITTER=30`）、`hybrid` 打法，每次 192 局，**同一模型至少跑两次合并**
-（同一模型两次能差 0.5 关以上）。均值和标准误由 `playthrough_stats.py` 从逐关清掉次数还原。
+### 2026-09-23 → 10-14: switching the target from "per-stage average" to "playthrough" (latest)
 
-**当前最好：主网络 + 2-2 专关网络，连打平均 8.65 ± 0.20 关**（8.93 / 8.37，两次各 192 局），
-比同一主网络单打（v47 7.89 ± 0.20）多 0.76 关（约 2.7σ），最好一局打到 6-2（过 21 关）。
-2-2 最终打通的比例 63% → 78%，每次进 2-2 耗命 1.0 → 0.77。下一批耗命大户是 2-4、4-3、3-3、1-3。
-上限参照：2-2 直接交给 IMPALA 老师打是 9.76 ± 0.22。
+**The headline metric changed.** The 28-stage single-stage average rose to 90.6% (SWA), yet the playthrough didn't budge (5.6 → 5.7 stages): the single-stage average gives 8-3 and 2-2
+the same weight, but 2-2 stops nearly 70% of runs and almost nobody reaches 8-3. From here on the **playthrough** is the primary metric: full game, 3 shared lives,
+re-jitter the phase on every new stage (`MARIO_REJITTER=30`), `hybrid` play mode, 192 runs per evaluation, **every model run at least twice and merged**
+(the same model can differ by more than 0.5 stages between two runs). Mean and standard error are reconstructed by `playthrough_stats.py` from per-stage clear counts.
 
-| 阶段 | 做法 | 连打平均 |
+**Current best: main network + 2-2 stage-specific network, playthrough average 8.65 ± 0.20 stages** (8.93 / 8.37, two runs of 192 each),
+0.76 stages more than the same main network alone (v47 7.89 ± 0.20, about 2.7σ); the best run reached 6-2 (21 stages cleared).
+The share of runs that eventually clear 2-2 went 63% → 78%, and lives spent per entry into 2-2 went 1.0 → 0.77. The next biggest life sinks are 2-4, 4-3, 3-3, 1-3.
+Upper-bound reference: handing 2-2 directly to the IMPALA teacher gives 9.76 ± 0.22.
+
+| Stage | Approach | Playthrough avg |
 |---|---|---|
-| 起点 | v32 / SWA | 5.9 |
-| 连打 DAgger | 学生按部署方式打整局、每帧问当前关老师（`collect_dagger_playthrough.py`），两轮 | **8.07 ± 0.13**（v42） |
-| 4-4 | 读反汇编写状态专家 `expert_44.py`，学生学会 4-4（31/31） | 8.02（v44，持平但会 4-4） |
-| 2-2 换老师 | 见下 | 8.10（v46）/ 7.89（v47） |
-| **主网络 + 2-2 专关网络** | 进 2-2 换成只学 2-2 的学生（`run_fullgame.py` 的 `MARIO_STAGE_MODELS`） | **8.65 ± 0.20** |
+| Starting point | v32 / SWA | 5.9 |
+| Playthrough DAgger | Student plays whole games the way it is deployed, querying the current stage's teacher every frame (`collect_dagger_playthrough.py`), two rounds | **8.07 ± 0.13** (v42) |
+| 4-4 | Read the disassembly and wrote a state-based expert `expert_44.py`; the student learns 4-4 (31/31) | 8.02 (v44, flat but can do 4-4) |
+| 2-2 teacher swap | See below | 8.10 (v46) / 7.89 (v47) |
+| **Main network + 2-2 stage-specific network** | On entering 2-2, switch to a student trained only on 2-2 (`MARIO_STAGE_MODELS` in `run_fullgame.py`) | **8.65 ± 0.20** |
 
-#### 学生这一侧已经到顶
+#### The student side has hit its ceiling
 
-- **软蒸馏 loss 有硬下界 = 老师输出分布熵的均值。** 28 关全量下界 0.8346，v32 已到 0.8600，吃掉了
-  "常数解（1.8556）到下界"之间 97.5% 的空间。加大网络（BigCNN 9.55M）只把缺口从 0.0254 缩到 0.0227，
-  通关率持平；锐化目标、硬标签没有收益。这个下界十秒就能算出来，先算再谈"加容量"。
-- **大骨干会塌成常数函数**（对任何输入输出同一个分布，loss 精确等于边缘分布的熵）。两种起因：
-  sb3 的 √2 正交初始化在 20 层残差上连乘放大（`impala_cnn.py` 用 GroupNorm 修），以及初始化抽签
-  （同一 seed 放倒两种大小的网络）。`distill_all12_gpu.py` 在真实训练里按这个判据检测并自动换 seed。
-  代理探针（全批量 / 小批量）都漏报过，判据只能放在真实训练里。
-- **4-4 已解**：此前十二种办法全 0/31。按反汇编 `ProcLoopCommand`，4-4 在第 5 页要求 `Player_Y==$40`、
-  第 9 页要求 `==$B0` 且站在地上，检查发生在渲染器加载那页第 0 列的那一帧。缺的从来不是"正确走法"，
-  而是"游戏怎么判"——这只能从反汇编读出来。
+- **Soft distillation loss has a hard floor = the mean entropy of the teacher's output distribution.** The floor over all 28 stages is 0.8346; v32 already reached 0.8600, using up
+  97.5% of the gap between "constant solution (1.8556) and the floor". A bigger network (BigCNN 9.55M) only shrank the gap from 0.0254 to 0.0227,
+  with clear rate flat; sharpened targets and hard labels gave nothing. This floor takes ten seconds to compute — compute it before talking about "more capacity".
+- **Large backbones collapse into a constant function** (same distribution for any input; loss exactly equals the entropy of the marginal distribution). Two causes:
+  sb3's √2 orthogonal init compounding through 20 residual layers (fixed in `impala_cnn.py` with GroupNorm), and the initialization lottery
+  (the same seed knocking out networks of two different sizes). `distill_all12_gpu.py` detects this with that criterion during real training and switches seed automatically.
+  Proxy probes (full-batch / small-batch) both missed it at times; the criterion can only live in real training.
+- **4-4 is solved**: twelve previous approaches all scored 0/31. Per the disassembly's `ProcLoopCommand`, 4-4 requires `Player_Y==$40` on page 5
+  and `==$B0` while standing on the ground on page 9, with the check happening on the frame when the renderer loads column 0 of that page. What was missing was never "the right route"
+  but "how the game judges it" — and that can only be read from the disassembly.
 
-#### 病根是「背时机」，不是能力不够
+#### The root cause is "memorizing timing", not lack of ability
 
-确定性模拟器 + 只在开局扰动，老师学成"背一串精确时机"：单关 98% 而连打进关 25% 失败、
-加 25% 粘滞动作就塌、蒸馏后接 RL 五种做法都只是重新洗牌哪些相位能过。
-**在粘滞动作环境里续训老师**能扳过来：1-3 粘滞下 33% → 85%，干净环境 121/121 不掉，
-连打进 1-3 第一次失败 6.4% → 0%。续训一路平稳，没有以往续训的断崖。
+Deterministic emulator + perturbation only at the start of a run → the teacher learns to "memorize a string of precise timings": 98% single-stage yet 25% failure on entering the stage in a playthrough,
+collapse when 25% sticky actions are added, and five ways of doing RL after distillation all just reshuffle which phases pass.
+**Continuing teacher training in a sticky-action environment** turns it around: 1-3 under sticky actions 33% → 85%, still 121/121 in the clean environment,
+and first-attempt failure on entering 1-3 in a playthrough 6.4% → 0%. Continued training stayed smooth all the way, without the cliff seen in earlier continued training.
 
-#### 2-2：一步步拆到底
+#### 2-2: taking it apart step by step
 
-2-2 每次进关平均耗掉约 1 条命，比其余所有关加起来还多。按时间顺序：
+Each entry into 2-2 costs about 1 life on average — more than all other stages combined. In chronological order:
 
-1. **真病根是游戏的随机数。** 随机数在 RAM `$07A7` 起 7 个字节、每帧推进；飞鱼出生时往上漂还是往下漂、
-   墨鱼何时转向都读它。单关环境每次进 2-2 随机数都一样，老师只见过一套鱼群；连打进 2-2 时它取决于开机以来的
-   总帧数。**不训练、只换随机数**（`diag_22_rng.py`，状态池由模拟器空跑采样），老师单关从 66% 掉到 41-47%，
-   正好落在连打进关的 43.5%；同一开局时机换了随机数，过→死 47 个、死→过 24 个。
-   粘滞动作治不了这个——它扰动的是马里奥的按键，碰不到鱼。
-2. **每局换随机数续训**（`MARIO_RNG_POOL`）：背鱼群治好了（原样和换随机数成绩持平），
-   连打首次进 2-2 从 41% 到 49%（加粘滞那组，五批合计 1453 局），但没过预设的 55%。
-3. **看不见？不是。**（`diag_22_visible.py`）撞死马里奥的那条鱼，死前在画面里连续待了中位 1.2 秒、
-   最短 0.87 秒，几乎都从屏幕右缘进来。信息在画面里，是没学会躲。
-4. 存档搜索补硬标签（死亡点 92% 搜得出活路，学进去但不迁移）、鱼群路段存档开局专练：都在 45-52%。
-5. **换骨干是唯一过线的。** 同样每局换随机数 + 粘滞、**从零**训：WideNatureCNN 1500 万步学不动
-   （单关 0-1/121），IMPALA-CNN（16/32/64/64 + GroupNorm）2500 万步连打首次进 2-2 **57.8%**（两次合并）。
-   ⚠️ 同配置换一个种子只有 30.5%——这是运气好的一个种子，不能说"换 IMPALA 就稳定变好"。
-6. **老师变强了，学生没跟上。** 拿它重标 2-2 蒸出 v47，连打 7.89，没超过 v46。同口径拆开量
-   （前面的关由同一个学生打，进 2-2 换人，各 300 局）：
+1. **The real root cause is the game's random number generator.** The RNG lives in 7 bytes starting at RAM `$07A7` and advances every frame; whether a Cheep-Cheep drifts up or down when it spawns,
+   and when a Blooper turns, both read it. In the single-stage environment the RNG is identical every time 2-2 starts, so the teacher only ever saw one set of fish; in a playthrough it depends on
+   the total frame count since power-on. **No training, just swapping the RNG** (`diag_22_rng.py`, state pool sampled by idling the emulator) drops the teacher's single-stage rate from 66% to 41-47%,
+   landing right on the playthrough entry rate of 43.5%; with the same start timing and a swapped RNG, 47 pass→die and 24 die→pass.
+   Sticky actions can't fix this — they perturb Mario's button presses and never touch the fish.
+2. **Continued training with a new RNG every episode** (`MARIO_RNG_POOL`): memorizing the fish was cured (original and swapped-RNG scores are equal),
+   and first entry into 2-2 in a playthrough went from 41% to 49% (the group with sticky actions, 1453 runs over five batches), but did not reach the preset 55%.
+3. **Can't see it? No.** (`diag_22_visible.py`) The fish that kills Mario has been continuously on screen for a median 1.2 seconds before the death,
+   minimum 0.87 seconds, almost always entering from the right edge of the screen. The information is in the frame; the agent just hasn't learned to dodge.
+4. Savestate search for hard labels (a survival path was found from 92% of death points; it was learned but didn't transfer), and dedicated practice starting from savestates on the fish section: all at 45-52%.
+5. **Switching the backbone is the only thing that cleared the bar.** Same per-episode RNG swap + sticky actions, trained **from scratch**: WideNatureCNN couldn't learn in 15M steps
+   (single-stage 0-1/121); IMPALA-CNN (16/32/64/64 + GroupNorm) reached **57.8%** first-entry 2-2 in playthroughs after 25M steps (two runs merged).
+   ⚠️ The same config with another seed got only 30.5% — this was one lucky seed; you can't claim "switching to IMPALA reliably helps".
+6. **The teacher got stronger; the student didn't follow.** Relabeling 2-2 with it and distilling gave v47, playthrough 7.89, not better than v46. Measured separately under the same protocol
+   (earlier stages played by the same student, swap players on entering 2-2, 300 runs each):
 
-   | 谁打 2-2 | 首次进 2-2 通过 |
+   | Who plays 2-2 | First-entry 2-2 pass |
    |---|---|
-   | IMPALA 老师 | 57.8% |
-   | 只用 2-2 数据蒸的学生（WideNatureCNN） | 46.9% |
-   | 同上但只学老师 argmax（硬标签） | 28.5% |
-   | 全关学生 v47 | 24-31% |
-   | 全关学生、2-2 帧加权 3 倍（v49） | 35.1% |
+   | IMPALA teacher | 57.8% |
+   | Student distilled only on 2-2 data (WideNatureCNN) | 46.9% |
+   | Same, but learning only the teacher's argmax (hard labels) | 28.5% |
+   | All-stage student v47 | 24-31% |
+   | All-stage student, 2-2 frames weighted 3× (v49) | 35.1% |
 
-   大头是**多关挤占**（24% → 47%），蒸馏本身只损 11 个百分点。在一个网络里给 2-2 加 3 倍权重拿不回来，
-   学生换 IMPALA 更差（连打 5.55，2-2 只剩 6.8%），硬标签也更差。
-7. **于是拆成两个网络**：主网络打其余关，进 2-2 换成只学 2-2 的学生。两者都是 WideNatureCNN，都只看像素，
-   按画面上的关卡号切换。
+   The bulk is **multi-stage crowding** (24% → 47%); distillation itself only loses 11 percentage points. Giving 2-2 3× weight inside one network doesn't win it back,
+   an IMPALA student is worse (playthrough 5.55, 2-2 down to 6.8%), and hard labels are also worse.
+7. **So split into two networks**: the main network plays the other stages; on entering 2-2 it switches to a student trained only on 2-2. Both are WideNatureCNN, both see pixels only,
+   and the switch is driven by the stage number shown on screen.
 
-#### 这一段最值钱的几条
+#### The most valuable lessons from this stretch
 
-- **先用不训练的诊断坐实病因，再花训练预算。** 换随机数那个实验十分钟出结论，此前七种训练手段全打在了错的地方。
-- **单关挑档对连打没有预测力。** 单关 73/121 的档进连打只有 45.9%；单关第一的档连打不如第二的。
-- **单次评测会骗人。** 同一个老师两次首次进 2-2 测出 63.5% 和 51.9%；同一个学生两次连打 8.16 和 7.61。
-- **RL 从零训强烈依赖种子**：同配置两个种子，一个 57.8%、一个 30.5%。
+- **Confirm the cause with training-free diagnostics first, then spend the training budget.** The RNG-swap experiment gave its answer in ten minutes; the seven training methods before it all hit the wrong target.
+- **Single-stage checkpoint selection has no predictive power for playthroughs.** A checkpoint at 73/121 single-stage only got 45.9% in playthroughs; the top single-stage checkpoint was worse in playthroughs than the second.
+- **A single evaluation lies.** The same teacher measured 63.5% and 51.9% first-entry 2-2 in two runs; the same student scored 8.16 and 7.61 in two playthrough runs.
+- **RL from scratch depends strongly on the seed**: same config, two seeds, one 57.8% and one 30.5%.
 
-### 扩到 32 关之后（2026-09-09）
+### After scaling to 32 stages (2026-09-09)
 
-**老师**：29 个非迷宫关全部有档，**27 关 ≥87%，均值 93.2%**（十二关起步时是 66%）。
-名册与实测分数在 [`teachers.py`](teachers.py)，是唯一事实来源。
+**Teachers**: all 29 non-maze stages have a checkpoint, **27 stages ≥87%, mean 93.2%** (66% when the twelve-stage effort started).
+The roster and measured scores are in [`teachers.py`](teachers.py), the single source of truth.
 
-**学生**（一个网络打 28 关，7 动作）：
+**Students** (one network playing 28 stages, 7 actions):
 
-| 学生 | 逐关均值（逐相位 argmax） | ≥90% | 满分 |
+| Student | Per-stage mean (per-phase argmax) | ≥90% | Perfect |
 |---|---|---|---|
-| `mario_v29` 基础蒸馏 | 78.9% | 11/28 | 6/28 |
+| `mario_v29` base distillation | 78.9% | 11/28 | 6/28 |
 | `mario_v30` +DAgger×1 | 83.3% | 14/28 | 8/28 |
 | **`mario_v31` +DAgger×2** | **86.8%** | **16/28** | **9/28** |
 | `mario_v32` +DAgger×3 | 85.9% | 14/28 | 7/28 |
 
-### 连打落差：查出机制并修掉（2026-09-20）
+### The playthrough gap: mechanism found and fixed (2026-09-20)
 
-连打只有 5.9 关而逐关 86.8%，这个落差从十二关时代就在。这次定位到并修掉了一大块：
+Playthrough at only 5.9 stages versus 86.8% per-stage — this gap had been there since the twelve-stage era. This time a big chunk of it was located and fixed:
 
-**先证伪一个**：连打进关的相位由上一关用时决定、不均匀，怀疑它系统性落在坏相位上。
-加 `MARIO_REJITTER=30` 每次进新关重抖相位拉回均匀口径 —— 成绩没变好（6.0 → 5.5，噪声内）。**不是相位。**
+**First, one hypothesis refuted**: the phase on entering a stage in a playthrough is determined by the previous stage's time and isn't uniform; the suspicion was that it systematically lands on bad phases.
+Adding `MARIO_REJITTER=30` to re-jitter the phase on every new stage, restoring the uniform protocol — the score didn't improve (6.0 → 5.5, within noise). **It's not the phase.**
 
-**真凶是推理模式**。`hybrid` 打法"死一次之后这条命改用采样"，而采样比 argmax 弱得多：
+**The real culprit is the inference mode**. The `hybrid` mode "switches to sampling for the rest of that life after one death", and sampling is much weaker than argmax:
 
-| 打法 | 28 关均值 |
+| Mode | 28-stage mean |
 |---|---|
-| 全 argmax | 85.9% |
-| 全采样 | **70.6%** |
+| All argmax | 85.9% |
+| All sampling | **70.6%** |
 
-只有 2-3(+19pp) / 5-1(+10) / 8-3(+10) 三关偏好采样，其余 25 关 argmax 全胜，最狠的 8-2 差 52pp、1-3 差 48pp。
-⇒ 死一次就把后面整条命从 86% 降到 71%。
+Only three stages prefer sampling — 2-3 (+19pp) / 5-1 (+10) / 8-3 (+10); argmax wins on the other 25, most sharply 8-2 by 52pp and 1-3 by 48pp.
+⇒ One death drops the whole rest of that life from 86% to 71%.
 
-**但把这个差异转成连打收益，没有做出统计上站得住的结果。** N=96 复测四种配置：
+**But turning this difference into playthrough gains did not produce a statistically solid result.** Re-testing four configurations at N=96:
 
-| 打法 | 平均通关关数 | 最好 |
+| Mode | Avg stages cleared | Best |
 |---|---|---|
 | hybrid | 6.1 | 15 |
-| auto（按实测 DET 表） | 6.0 | 15 |
-| 全局重抖相位 | 5.8 | 15 |
-| 选择性重抖（只对 2-2/2-3/2-4/3-2） | **6.4** | 15 |
+| auto (per measured DET table) | 6.0 | 15 |
+| Global phase re-jitter | 5.8 | 15 |
+| Selective re-jitter (only 2-2/2-3/2-4/3-2) | **6.4** | 15 |
 
-四者都在 5.8-6.4，彼此约 1σ 内。⚠️ **撤回**：先前报过"auto 6.5 vs hybrid 6.0"，
-那是 **N=24 的噪声**，N=96 下 auto 反而略低。
-"平均通关关数"是个重尾噪声量，别拿 N=24 去比——**条件成功率才是能看的仪器**。
+All four sit at 5.8-6.4, within about 1σ of each other. ⚠️ **Retracted**: I previously reported "auto 6.5 vs hybrid 6.0";
+that was **N=24 noise** — at N=96 auto is actually slightly lower.
+"Average stages cleared" is a heavy-tailed noisy quantity; don't compare it at N=24 — **conditional success rate is the instrument worth reading**.
 
-**能站住的是逐关条件成功率**（n 足够大）：
-- 相位确实要紧，但**方向逐关分裂**：全局重抖把 2-2 从 36%(31/86) 抬到 53%(34/64)、
-  2-3 77→91、2-4 67→81，却把 **1-3 从 96/96 砸到 74/96**。两边在总数上抵消，
-  所以只看聚合指标会误判成"相位无关"——我第一次就是这么误判的。
-  ⇒ `MARIO_REJITTER_STAGES` 改成按关卡开。
-- **2-2 是压倒性的一阶瓶颈**：96 局里 86 局走到它，只 31 局过得去，吃掉 135 条命。
-  与十二关时代"全通率基本由 2-2 决定"完全一致。
+**What does hold up is per-stage conditional success rate** (with large enough n):
+- Phase does matter, but **the direction splits by stage**: global re-jitter lifts 2-2 from 36% (31/86) to 53% (34/64),
+  2-3 77→91, 2-4 67→81, but smashes **1-3 from 96/96 down to 74/96**. The two sides cancel in the total,
+  so looking only at the aggregate metric misleads you into "phase doesn't matter" — which is exactly how I misread it the first time.
+  ⇒ `MARIO_REJITTER_STAGES` now enables it per stage.
+- **2-2 is the overwhelming first-order bottleneck**: 86 of 96 runs reached it, only 31 got through, costing 135 lives.
+  Fully consistent with the twelve-stage era's "full-clear rate is basically decided by 2-2".
 
-最好那局打通 **1-1 → 4-3 共 15 关**，停在 4-4 —— **4-4 未解情况下的理论上限**（四种配置都能达到）。
+The best run cleared **1-1 → 4-3, 15 stages**, stopping at 4-4 — **the theoretical ceiling while 4-4 is unsolved** (all four configurations reached it).
 
-### 对 2-2 定点补课：单关涨了，整体净负（v33，不采用）
+### Targeted remedial training on 2-2: single-stage up, net negative overall (v33, not adopted)
 
-`diag_agreement22`（老师 argmax 开车、逐帧比 argmax）把师生差距定位得很准：
-分歧**集中在 x1600-2800**（不一致率 25-40%、KL 0.29-0.53；而 x0-1400 只有 8-16%、KL<0.07），
-学生自己开车的死亡点也在同一区间（15/24，中位 2499）。按该脚本判据：集中＝精度问题，
-处方是加密那一段的示范。⇒ 只收 x≥1600 的 24 万帧加进数据集重蒸。
+`diag_agreement22` (the teacher's argmax drives, argmax compared frame by frame) pinned down the teacher–student gap precisely:
+disagreement is **concentrated in x1600-2800** (disagreement rate 25-40%, KL 0.29-0.53; versus only 8-16% and KL<0.07 in x0-1400),
+and the student's own death points when it drives are in the same range (15/24, median 2499). By that script's criterion: concentrated = a precision problem,
+and the prescription is denser demonstrations on that section. ⇒ Took only the 240k frames with x≥1600, added them to the dataset and re-distilled.
 
-**处方生效了，代价更大**：
+**The prescription worked, but the cost was bigger**:
 
 | | v32 | v33 |
 |---|---|---|
-| 2-2 单关 | 58.1% | **64.5%** |
-| 逐关均值 | **85.9%** | 84.6% |
+| 2-2 single-stage | 58.1% | **64.5%** |
+| Per-stage mean | **85.9%** | 84.6% |
 | ≥90% | **14** | 13 |
-| 连打平均 | **6.4** | 5.6 |
+| Playthrough avg | **6.4** | 5.6 |
 
-涨的：2-2 +6.5、2-4 +6.5、6-1 +22.6。跌的：4-2 −23、5-3 −19、5-2 −13、5-1 −13。
-⇒ 又一次"配方间方差远大于逐关方差"。这跟第一轮 DAgger 打坏 3-3 是同一现象，
-但这次**自动配比救不了**——定点数据不在 `weights()` 的调节范围内。
-**v33 不采用，v32 保持为最好的模型。**
+Up: 2-2 +6.5, 2-4 +6.5, 6-1 +22.6. Down: 4-2 −23, 5-3 −19, 5-2 −13, 5-1 −13.
+⇒ Once again "variance between recipes is far larger than per-stage variance". This is the same phenomenon as the first DAgger round breaking 3-3,
+but this time **automatic mixing ratios can't save it** — the targeted data is outside what `weights()` adjusts.
+**v33 is not adopted; v32 remains the best model.**
 
-**逐关和连打是两个指标，第三轮 DAgger 上把这件事演示得很清楚**（同为 hybrid / N=24）：
+**Per-stage and playthrough are two different metrics, and the third DAgger round demonstrates this clearly** (both hybrid / N=24):
 
-| | 逐关均值 | ≥90% | 连打平均 | 连打最好 | 连打最差 |
+| | Per-stage mean | ≥90% | Playthrough avg | Playthrough best | Playthrough worst |
 |---|---|---|---|---|---|
 | v31 | **86.8%** | **16/28** | 4.7 | **12** | 2 |
 | v32 | 85.9% | 14/28 | **5.9** | 9 | **5** |
 
-v32 逐关持平略降、连打的**均值和下限都明显变好**（最差那局从 2 关提到 5 关）。
-⇒ 想要"稳定连打"就用 v32，想要"逐关峰值"就用 v31。
-同口径下旧的十二关学生 v7 只有 2.0 关。
-> ⚠️ 别拿 v7 那个"平均 6.6 关"来比——那是它跑 `auto` 模式（带一张逐关手调的 DET/STO 表）
-> 拿的，跟这里的 hybrid 不是一个口径。我差点据此报出一个"连打退步了"的假回归，
-> 同口径重跑对照才发现方向是反的。**记忆里的数字换了配置就不能直接比。**
+v32 is flat-to-slightly-down per-stage, while the playthrough **mean and floor both clearly improve** (worst run up from 2 stages to 5).
+⇒ For "stable playthroughs" use v32; for "per-stage peak" use v31.
+Under the same protocol, the old twelve-stage student v7 gets only 2.0 stages.
+> ⚠️ Don't compare against v7's "average 6.6 stages" — that came from running it in `auto` mode (with a hand-tuned per-stage DET/STO table),
+> which is not the same protocol as hybrid here. I almost reported a fake "playthrough regression" based on it;
+> only a same-protocol rerun showed the direction was the opposite. **Numbers from memory can't be compared directly once the config changes.**
 
-连打的真实瓶颈在**前四关**，且与逐关分数严重脱节：1-3 连打 79%（逐关 97%）·
-1-4 63%（97%）· 2-4 57%（100%）。3-1 之后样本量塌到个位数，那些数字不要读。
+The real playthrough bottleneck is in **the first four stages**, and it is badly disconnected from per-stage scores: 1-3 playthrough 79% (per-stage 97%) ·
+1-4 63% (97%) · 2-4 57% (100%). After 3-1 the sample size collapses to single digits; don't read those numbers.
 
-**没解决的**：三个迷宫城堡 4-4/7-4/8-4（4-4 上试过十二种办法全 0/31，已结案）。
-> 正确走法查得到（4-4＝上→下），所以缺的不是答案。关键否定结论是**闸门处的位置不是判据**：
-> 高度扫描里闸门窗口内 y=40..232 九档全回卷；按正解喂路标后模型确实学会把 y 从 191-229
-> 压到 127，照样回卷。判据是**更早走的哪条道**（路径状态），而"走哪条路"这个正解
-> 被我编码成了"到终点站在哪"这个位置条件——**查资料解决了候选，没解决建模**。
+**Unsolved**: the three maze castles 4-4/7-4/8-4 (twelve approaches tried on 4-4, all 0/31; case closed).
+> The correct route can be looked up (4-4 = up → down), so what's missing isn't the answer. The key negative result is that **position at the gate is not the criterion**:
+> in a height sweep, all nine settings y=40..232 inside the gate window loop back; after feeding waypoints along the correct route, the model did learn to push y from 191-229
+> down to 127, and it still looped back. The criterion is **which path was taken earlier** (path state), and I encoded the correct answer "which path to take"
+> as a position condition "where you stand at the end" — **looking it up solved the candidates, not the modeling**.
 
-另外还没解决的：
-两个水关 2-2 84% / 7-2 23%（水下是系统性短板，唯一没试的 skip=2 会破坏"一个网络打完全部关卡"）。
+Also still unsolved:
+the two water stages 2-2 84% / 7-2 23% (underwater is a systematic weak spot; the only untried option, skip=2, would break "one network plays every stage").
 
-### 早期：十二关阶段
+### Early: the twelve-stage phase
 
 
-| 世界 | 平均通关率 | 录像 |
+| World | Avg clear rate | Recording |
 |---|---|---|
 | World 1 (1-1 ~ 1-4) | 52% | `mario_world1.gif` |
 | World 2 (2-1 ~ 2-4) | 59% | `mario_world2.gif` |
 | World 3 (3-1 ~ 3-4) | 60% | `mario_world3.gif` |
-| World 1+2 八关合并（单网络） | 63% | `mario_all8.gif` |
-| **World 1+2+3 十二关合并（单网络）** | **73%** | `mario_all12.gif` |
+| World 1+2 eight-stage merge (single network) | 63% | `mario_all8.gif` |
+| **World 1+2+3 twelve-stage merge (single network)** | **73%** | `mario_all12.gif` |
 
-十二关逐关（每关 100 局随机采样）：1-1 60% / 1-2 86% / 1-3 95% / 1-4 57% /
-2-1 76% / 2-2 70% / 2-3 76% / 2-4 71% / 3-1 73% / 3-2 79% / 3-3 78% / 3-4 54%——
-一关都不挂零，最差的 3-4 也有 54%。
+Twelve stages, per stage (100 randomly sampled runs each): 1-1 60% / 1-2 86% / 1-3 95% / 1-4 57% /
+2-1 76% / 2-2 70% / 2-3 76% / 2-4 71% / 3-1 73% / 3-2 79% / 3-3 78% / 3-4 54% —
+not a single stage at zero; even the worst, 3-4, is at 54%.
 
-> ⚠️ **上面这张表的口径有系统性乐观偏差，后来才发现。** 这些评测每局都从"游戏刚启动"的同一状态开局，
-> 敌人和移动平台的相位每次一样，策略可以靠背一段固定动作序列拿分。加上 Atari 标准的
-> **no-op starts**（开局随机空按 0-30 帧，只改相位）之后，同一批模型十二关平均 **73% → 53%**，
-> 其中 2-2 从 70% 掉到 4%。见下面「[评测口径这一课](#评测口径这一课no-op-starts)」——
-> 那是这个项目最值钱的一段，也是唯一一次发现"之前所有数字都要打折"。
+> ⚠️ **The protocol behind the table above has a systematic optimistic bias, discovered only later.** Each of these evaluations started from the same "game just booted" state,
+> so enemy and moving-platform phases were identical every time, and a policy could score by memorizing a fixed action sequence. After adding Atari's standard
+> **no-op starts** (0-30 random no-op frames at the start, changing only the phase), the same models' twelve-stage average went **73% → 53%**,
+> with 2-2 falling from 70% to 4%. See "[The evaluation-protocol lesson](#the-evaluation-protocol-lesson-no-op-starts)" below —
+> the most valuable part of this project, and the only time I found that "every previous number needs a discount".
 
-一个网络连续打通十二关：
+One network clearing twelve stages in a row:
 
-![十二关全通](mario_all12.gif)
+![Twelve stages cleared](mario_all12.gif)
 
-最难啃的 2-2 水下关（一格宽的鱼缝 + 来回游的 Cheep-Cheep）：
+The toughest one, underwater stage 2-2 (one-tile-wide gaps between fish + Cheep-Cheeps swimming back and forth):
 
-![2-2 通关](mario_2_2_clear.gif)
+![2-2 cleared](mario_2_2_clear.gif)
 
-## 方法论：为什么不是"一个 PPO 硬训所有关"
+## Methodology: why not "one PPO brute-forcing every stage"
 
-直接拿 PPO 混训多关会**打地鼠**——学会一关就忘另一关（灾难性遗忘 + 任务干扰）。
-真正跑通的是一条「专家 → 蒸馏 → 合并」的流水线：
+Training PPO directly on a mix of stages turns into **whack-a-mole** — learn one stage, forget another (catastrophic forgetting + task interference).
+What actually worked is an "expert → distillation → merge" pipeline:
 
-1. **单关专家**：每个难关单独用 PPO 训一个专家（小 NatureCNN），冲到 80-90%。
-   容易的关用混训（`SuperMarioBrosRandomStages` 随机采样）一把拿下，只给钉子户单独补专家。
-2. **收老师数据**：让每个专家自己跑（随机采样），记下 `(画面 → 老师的 7 个动作概率)`。
-3. **软策略蒸馏**：一个学生网络用监督学习模仿所有老师的动作分布
-   （soft policy distillation，KL 软交叉熵 `-Σ p_老师 · log q_学生`）。纯监督，又快又稳。
-4. **DAgger 补漂移**：学生自己开车、老师在它走偏的状态上打标签，补进数据重蒸——
-   治蒸馏的分布漂移（学生一旦偏离老师示范的成功轨迹就懵）。
-5. **WideCNN 扩容量**：关数多了，小网络塞不下（最难的反应式水关先被挤掉），
-   换加宽的 CNN 在监督蒸馏里接住。
-6. **跨世界合并**：把多个世界的蒸馏数据合在一起，蒸一个网络。
+1. **Single-stage experts**: train an expert per hard stage with PPO (small NatureCNN), pushing to 80-90%.
+   Easy stages are knocked out in one go with mixed training (`SuperMarioBrosRandomStages` random sampling); only the holdouts get their own expert.
+2. **Collect teacher data**: let each expert play (random sampling) and record `(frame → the teacher's 7 action probabilities)`.
+3. **Soft policy distillation**: one student network imitates every teacher's action distribution with supervised learning
+   (soft policy distillation, KL soft cross-entropy `-Σ p_teacher · log q_student`). Pure supervision, fast and stable.
+4. **DAgger for drift**: the student drives, the teacher labels the states where it goes off track, those are added to the data and re-distilled —
+   curing distillation's distribution shift (once the student strays from the teacher's demonstrated successful trajectories, it's lost).
+5. **WideCNN for capacity**: with more stages, the small network can't hold them all (the hardest reactive water stage gets squeezed out first),
+   so a widened CNN takes over in supervised distillation.
+6. **Cross-world merge**: combine the distillation data of multiple worlds and distill a single network.
 
-关键认知：**蒸馏/DAgger 是监督学习，分钟级又稳；昂贵的 RL 只在训专家时付一次。**
+Key insight: **distillation/DAgger is supervised learning, minutes and stable; expensive RL is paid only once, when training the experts.**
 
-## 一路踩平的坑（实战笔记）
+## Pitfalls flattened along the way (field notes)
 
-- **稀疏奖励 → 梯子塑形**：2-2 真信号只有摸到旗杆（x≈3161），中间全程"做对了也没人告诉你"。
-  裸专家黑灯瞎火卡在 5%。在硬点前摆一排一次性 checkpoint 奖励（把远期大奖拆成密集近期路标），
-  通关率 5% → 70%。
-- **det vs stochastic 评估**：没收敛的策略别用 `deterministic=True` 评估——argmax 会卡在某个
-  概率性障碍前反复送死，严重低估真实能力。看随机采样。
-- **容量 vs 任务干扰**：关越多，容量越紧张，最不合群的关（水关/迷宫）总是第一个掉血。
-  通用关之间高度冗余（都是"往右冲 + 该跳就跳"），反而互相正迁移（1-3 在八关里比单训还强）。
-- **custom CNN 双重 /255 归一化 bug**：自带归一化的 features extractor + sb3 默认 `normalize_images=True`
-  → 输入被除两次成 ~[0,0.004] → 激活塌缩、loss 卡死不降。修复：`policy_kwargs=dict(normalize_images=False)`。
-- **numpy 必须 <2**：nes-py / gym 跟 numpy 2.x 不兼容（`OverflowError`）。装 torch/sb3 时会被升回去，记得压回。
-- **内存墙 → 换成显存**：把多个世界塞进一个网络时，蒸馏数据随关数线性涨（12 关 875k 帧 obs ≈ 25GB），
-  36GB 机器装不下 → 压缩内存把随机访问拖慢 25 倍（~29min/epoch），磁盘 memmap 也救不了
-  （25GB 远超 page cache，每 epoch 全 miss，从内存 bound 变磁盘 bound）。
-  搬到一张 96GB 显存的卡上，**整份 obs 直接常驻显存**，每个 batch 就是一次显存内 gather，
-  零 host→device 拷贝 → **9.3s/epoch（94k 帧/s），快约 180 倍**，60 epoch 十分钟跑完。
-  蒸馏本来就是"数据全程只读、随机取 batch"，这种负载最适合整份塞进显存，而不是想办法在内存里省。
-- **模型跨 numpy 大版本不通**：sb3 存的 zip 里 pickle 了 numpy 的内部布局，numpy 2.x 存的模型在
-  numpy 1.x 里 load 直接 `ModuleNotFoundError: numpy._core.numeric`。而模拟器这条链路被 nes-py 钉死在
-  numpy<2 → 蒸馏也必须在 numpy<2 的环境里做，别为了图快借一个 numpy 2 的环境训（训完发现评测加载不了）。
-  更阴的是这个错误在多进程评测里表现为 **worker 全部静默消失、主进程永远等**——`mp.Pool` 检测不到
-  worker 被硬杀，换 `ProcessPoolExecutor`（会抛 `BrokenProcessPool`）才看得见。
-- **一个 bug 值多少，取决于在哪个设定里量**：同一个双重归一化 bug，在八关那个原始配方里吃掉 9.3pp，
-  在数据更多、训得更久的十二关配方里只吃掉 2.9pp（网络能部分补偿被压到 ~[0,0.004] 的输入）。
-  第一次我在后者量，得出"这 bug 不是主因"的结论——读反了。见下面「消融」。
+- **Sparse reward → ladder shaping**: 2-2's only real signal is touching the flagpole (x≈3161); everything in between is "you did it right but nobody tells you".
+  The bare expert fumbled in the dark, stuck at 5%. Placing a row of one-time checkpoint rewards before the hard points (splitting the distant big reward into dense near-term waypoints)
+  took the clear rate 5% → 70%.
+- **det vs stochastic evaluation**: don't evaluate an unconverged policy with `deterministic=True` — argmax gets stuck in front of some
+  probabilistic obstacle and dies repeatedly, badly underestimating real ability. Look at random sampling.
+- **Capacity vs task interference**: the more stages, the tighter the capacity, and the most unusual stages (water/maze) always lose health first.
+  Generic stages are highly redundant with each other (all "run right + jump when needed") and actually transfer positively (1-3 was stronger in the eight-stage mix than trained alone).
+- **Custom CNN double /255 normalization bug**: a features extractor with its own normalization + sb3's default `normalize_images=True`
+  → input divided twice to ~[0,0.004] → activations collapse, loss stuck. Fix: `policy_kwargs=dict(normalize_images=False)`.
+- **numpy must be <2**: nes-py / gym are incompatible with numpy 2.x (`OverflowError`). Installing torch/sb3 will upgrade it back; remember to pin it down again.
+- **Memory wall → switch to VRAM**: when stuffing multiple worlds into one network, distillation data grows linearly with stage count (12 stages, 875k frames of obs ≈ 25GB);
+  a 36GB machine can't hold it → memory compression slows random access 25× (~29min/epoch), and disk memmap doesn't help either
+  (25GB far exceeds page cache, every epoch is all misses, going from memory-bound to disk-bound).
+  Moving to a card with 96GB VRAM, **the whole obs array lives in VRAM**, each batch is a single in-VRAM gather,
+  zero host→device copies → **9.3s/epoch (94k frames/s), about 180× faster**, 60 epochs done in ten minutes.
+  Distillation is inherently "data read-only throughout, random batches" — the workload best suited to putting it all in VRAM, rather than trying to save memory on the host.
+- **Models don't cross numpy major versions**: the zip sb3 saves pickles numpy's internal layout; a model saved under numpy 2.x
+  fails to load in numpy 1.x with `ModuleNotFoundError: numpy._core.numeric`. And the emulator chain is pinned by nes-py to
+  numpy<2 → distillation must also be done in a numpy<2 environment; don't borrow a numpy 2 environment to train faster (you'll find evaluation can't load it afterward).
+  Nastier still, in multiprocess evaluation this error shows up as **all workers silently vanishing and the main process waiting forever** — `mp.Pool` can't detect
+  a worker that was hard-killed; switching to `ProcessPoolExecutor` (which raises `BrokenProcessPool`) makes it visible.
+- **How much a bug is worth depends on the setting you measure it in**: the same double-normalization bug cost 9.3pp in the original eight-stage recipe,
+  but only 2.9pp in the twelve-stage recipe with more data and longer training (the network can partly compensate for input squeezed to ~[0,0.004]).
+  The first time I measured it in the latter and concluded "this bug isn't the main cause" — I read it backwards. See "Ablation" below.
 
-## 消融：十二关合并（74%）比八关合并（63%）强在哪
+## Ablation: why the twelve-stage merge (74%) beats the eight-stage merge (63%)
 
-三个变量：修不修双重归一化 bug / 30 还是 60 epoch / 喂八关(730k)还是十二关(875k)数据。
-每次只动一个，每关 100 局随机采样（"八关均"= 那 800 局的合并通关率，±1SE≈1.7pp）。
-一个 epoch 9 秒，六组训练 + 7200 局评测一小时内跑完——**便宜到没有理由靠猜**。
+Three variables: fix the double-normalization bug or not / 30 vs 60 epochs / feed eight-stage (730k) or twelve-stage (875k) data.
+Change one at a time, 100 random-sampling runs per stage ("eight-stage avg" = merged clear rate over those 800 runs, ±1SE≈1.7pp).
+One epoch is 9 seconds; six training runs + 7200 evaluation runs finish within an hour — **too cheap to justify guessing**.
 
-| 实验 | 数据 | epoch | 输入 | 八关均 | 十二关均 |
+| Experiment | Data | Epochs | Input | Eight-stage avg | Twelve-stage avg |
 |---|---|---|---|---|---|
-| ① 八关合并原配方 | 730k | 30 | 双重 /255 | **62.7%** | 41.8% |
-| ② | 875k | 60 | 双重 /255 | 71.0% | 69.5% |
-| ③ 十二关合并成果 | 875k | 60 | 正常 | **73.9%** | **72.9%** |
-| ④ | 875k | 30 | 正常 | 72.0% | 71.4% |
-| ⑤ | 730k | 60 | 正常 | 71.4% | 47.6% |
-| ⑥ = ① 只修 bug | 730k | 30 | 正常 | **72.0%** | 48.0% |
+| ① Original eight-stage merge recipe | 730k | 30 | Double /255 | **62.7%** | 41.8% |
+| ② | 875k | 60 | Double /255 | 71.0% | 69.5% |
+| ③ Twelve-stage merge result | 875k | 60 | Normal | **73.9%** | **72.9%** |
+| ④ | 875k | 30 | Normal | 72.0% | 71.4% |
+| ⑤ | 730k | 60 | Normal | 71.4% | 47.6% |
+| ⑥ = ① with only the bug fixed | 730k | 30 | Normal | **72.0%** | 48.0% |
 
-- **修 bug：+9.3pp**（①→⑥，同数据同 epoch，>3σ）。八关合并那次低分的主因。
-- **epoch 30→60：≈0**（⑥→⑤ −0.6pp，④→③ +1.9pp，都在噪声内）。686 万参的 WideCNN 在
-  30 epoch 已经收够了，"大网络要多训"这条在这儿不成立。
-- **加 World 3 数据：0 ~ +2.5pp**（60ep 时 ⑤→③ +2.5，30ep 时 ⑥→④ 0.0）。对老八关基本中性，
-  但**新的四关是白送的**（③ 的 W3：73/79/78/54）。
-- 所以「关越多容量越紧张」不成立：十二关在老八关上不输八关，还白拿四关。
-  2-2 水关 38%（①）→57%（⑥）→70%（③），它当年被"挤掉"主要是输入残废，不是容量。
-- **每关 30 局不够分辨这几 pp**：N=30 时某一关能在 57% 和 83% 之间跳（跨过 2σ），
-  先用它挑方向，下结论前把样本量提到 100。
+- **Fixing the bug: +9.3pp** (①→⑥, same data same epochs, >3σ). The main cause of the low eight-stage merge score.
+- **Epochs 30→60: ≈0** (⑥→⑤ −0.6pp, ④→③ +1.9pp, both within noise). The 6.86M-parameter WideCNN has already converged at
+  30 epochs; "bigger networks need more training" doesn't hold here.
+- **Adding World 3 data: 0 ~ +2.5pp** (⑤→③ +2.5 at 60ep, ⑥→④ 0.0 at 30ep). Basically neutral for the old eight stages,
+  but **the four new stages come for free** (③'s W3: 73/79/78/54).
+- So "more stages, tighter capacity" doesn't hold: twelve-stage training doesn't lose to eight-stage on the old eight, and gets four stages for free.
+  Water stage 2-2 went 38% (①) → 57% (⑥) → 70% (③); it was "squeezed out" back then mainly because of crippled input, not capacity.
+- **30 runs per stage aren't enough to resolve these few pp**: at N=30 a single stage can jump between 57% and 83% (crossing 2σ);
+  use it to pick a direction first, and raise the sample size to 100 before drawing conclusions.
 
-## 评测口径这一课：no-op starts
+## The evaluation-protocol lesson: no-op starts
 
-做到十二关合并之后，我去测了一件之前没测过的事：**把这个网络放进完整游戏，从 1-1 一路往下打，
-它能连过几关？** 逐关成绩是 73%，直觉上应该能连过七八关。
+After the twelve-stage merge, I measured something I hadn't before: **put this network into the full game, start from 1-1 and keep going —
+how many stages can it clear in a row?** Per-stage it was 73%; intuitively it should clear seven or eight in a row.
 
-实测：**平均 2.3 关**（32 局，最好 6 关）。
+Measured: **2.3 stages on average** (32 runs, best 6 stages).
 
-### 逐关 73%，连打 2.3 关，差距在哪
+### 73% per-stage, 2.3 stages in a playthrough — where's the gap
 
-先按关卡拆开，看"进了某关之后清掉它的概率"（64 局连打统计）：
+First, split by stage and look at "the probability of clearing a stage once you've entered it" (64 playthrough runs):
 
 | | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 |
 |---|---|---|---|---|---|---|
-| 逐关从头评 | 60% | 86% | 95% | 57% | 76% | 70% |
-| 连打中 | 81% | 88% | **57%** | 88% | 70% | **25%** |
+| Per-stage, from the start | 60% | 86% | 95% | 57% | 76% | 70% |
+| In a playthrough | 81% | 88% | **57%** | 88% | 70% | **25%** |
 
-掉的两关是 1-3 和 2-2——**一个是浮空移动平台，一个是来回游的 Cheep-Cheep，共同点是"障碍物在动"**。
-其余静态地形为主的关卡不降反升。而且连打里死在 2-2 的位置是 x=1235~1544，
-比它历史上的硬点 x≈2095 早得多：不是过不了那道一格宽的鱼缝，是中段就被鱼撞了。
+The two that drop are 1-3 and 2-2 — **one has floating moving platforms, the other Cheep-Cheeps swimming back and forth; what they share is "the obstacles move"**.
+The other stages, mostly static terrain, actually went up rather than down. And deaths in 2-2 during playthroughs happen at x=1235~1544,
+much earlier than its historical hard point at x≈2095: it isn't failing the one-tile-wide gap between fish; it gets hit by a fish midway.
 
-### 单变量实验：只改敌人相位
+### Single-variable experiment: change only the enemy phase
 
-开局随机空按几帧（no-op starts），别的什么都不动——地形、马里奥形态、时间、模型全一样，
-只是敌人和平台的相位被推开：
+Press no-op for a few random frames at the start (no-op starts) and change nothing else — terrain, Mario's form, timer, model all identical,
+only the enemy and platform phases are shifted:
 
-| 2-2 的通关率 | 0 帧 | 2 帧 | 4 帧 | 8 帧 | 16 帧 | 30 帧 |
+| 2-2 clear rate | 0 frames | 2 frames | 4 frames | 8 frames | 16 frames | 30 frames |
 |---|---|---|---|---|---|---|
-| 梯子专家 | 66% | 36% | 26% | 18% | 6% | 4% |
-| 十二关学生 | 80% | 24% | 12% | 10% | 6% | 4% |
+| Ladder expert | 66% | 36% | 26% | 18% | 6% | 4% |
+| Twelve-stage student | 80% | 24% | 12% | 10% | 6% | 4% |
 
-**抖 2 帧——1/30 秒——通关率腰斩。** 这不是鲁棒性不够，是整套动作跟鱼的位置逐帧锁死。
+**Jitter by 2 frames — 1/30 of a second — and the clear rate is cut in half.** This isn't insufficient robustness; the whole action sequence is locked frame by frame to the fish positions.
 
-按 Atari 标准口径（0-30 帧）重测所有模型：
+Re-testing all models under the Atari standard protocol (0-30 frames):
 
-| | 无抖动 | no-op 0-30 |
+| | No jitter | no-op 0-30 |
 |---|---|---|
-| 十二关学生 | 70.2% | **52.8%** |
-| 各关老师（在自己那关上） | 74.3% | **56.0%** |
+| Twelve-stage student | 70.2% | **52.8%** |
+| Per-stage teachers (on their own stage) | 74.3% | **56.0%** |
 
-**背轨迹的是老师本身，不是蒸馏引入的。** 所以这在蒸馏阶段修不了——RL 训练本身就得带 no-op starts。
-（注意 2-3 / 2-4 / 3-2 / 3-3 几乎不掉甚至微涨：那几关的老师是真会玩。不是全线崩，
-是"有移动威胁且时序可锁死"的关在崩。）
+**It's the teachers themselves that memorize trajectories; distillation didn't introduce it.** So it can't be fixed at the distillation stage — the RL training itself must include no-op starts.
+(Note 2-3 / 2-4 / 3-2 / 3-3 barely drop or even rise slightly: those teachers really can play. It isn't a collapse across the board;
+it's the stages "with moving threats whose timing can be locked in" that collapse.)
 
-这就是 Atari benchmark 用 no-op starts 的原因，这套管线从头到尾缺了这一环。
+This is why Atari benchmarks use no-op starts, and this pipeline lacked that piece from start to finish.
 
-### 重新解释两个旧结论
+### Reinterpreting two old conclusions
 
-- **「2-2 梯子塑形把通关率从 5% 拉到 70%」**：塑形教会它的主要是"把这段舞步跳完整"，
-  而不是"看见鱼就躲"。同一个模型加上抖动只剩 4%。
-- **「LSTM 治不了 2-2 的反应式躲避」**：那个环境根本没要求过反应——前馈网络靠背就能拿分，
-  记忆能力显不出优势。这个实验得在带抖动的环境里重做才有意义。
+- **"Ladder shaping on 2-2 took the clear rate from 5% to 70%"**: what shaping mainly taught it was "dance this routine all the way through",
+  not "dodge when you see a fish". The same model with jitter gets only 4%.
+- **"LSTM can't fix reactive dodging in 2-2"**: that environment never required reaction — a feed-forward network can score by memorizing,
+  so memory gives no visible advantage. The experiment only means something if redone in a jittered environment.
 
-### 带抖动重训 2-2
+### Retraining 2-2 with jitter
 
-从梯子专家 warm-start，带 no-op starts 训（最好的配方是**课程式加压**：抖动量 0-4 → 0-8 → 0-16 → 0-30
-逐级 warm-start，每级 2M 步）：
+Warm-start from the ladder expert and train with no-op starts (the best recipe is **curriculum-style escalation**: jitter 0-4 → 0-8 → 0-16 → 0-30,
+warm-starting each level, 2M steps per level):
 
-| 2-2 @ no-op 0-30（N=400） | argmax | 随机采样 |
+| 2-2 @ no-op 0-30 (N=400) | argmax | Random sampling |
 |---|---|---|
-| 梯子专家（原始） | 3% | 7% |
-| 直训 8M | 3% | 20% |
-| **课程 8M** | **35%** | 22% |
+| Ladder expert (original) | 3% | 7% |
+| Direct training 8M | 3% | 20% |
+| **Curriculum 8M** | **35%** | 22% |
 
-两个观察：
+Two observations:
 
-- **训完之后 Δ(有抖动 − 无抖动) ≈ 0**（直训 8M 是 25%/25%）——策略变成真正相位无关的了，
-  不再吃相位红利，也不再怕相位变化。只是绝对水平只有当年那个"78%"的三分之一。那才是实数。
-- **课程和直训学出了性质相反的策略**：直训的靠随机性活着（argmax 只有 3%），
-  课程的是尖的（argmax 35%、无抖动 100%）。分级加压逼出了确定的应对，一步登天只逼出了对冲。
+- **After training, Δ(jitter − no jitter) ≈ 0** (direct 8M is 25%/25%) — the policy became genuinely phase-independent:
+  no longer profiting from phase, no longer afraid of phase changes. Its absolute level is just a third of that old "78%". That's the real number.
+- **Curriculum and direct training learned policies of opposite character**: the directly trained one survives on randomness (argmax only 3%);
+  the curriculum one is sharp (argmax 35%, 100% without jitter). Graded escalation forced out a deterministic response; going all the way at once only forced out hedging.
 
-同样在抖动下重训老师，World 1 混训 5M 步：平均 40.5% → 52.8%，**1-3 从 0% 到 59%**。
-这条路是通的，代价是 1-2 掉了（打地鼠老问题）。
+Likewise retraining teachers under jitter, World 1 mixed training for 5M steps: average 40.5% → 52.8%, **1-3 from 0% to 59%**.
+This path works; the cost is that 1-2 dropped (the old whack-a-mole problem).
 
-### 收口：全链路都在诚实口径下重跑一遍
+### Wrap-up: rerunning the whole pipeline under the honest protocol
 
-按上面的发现把整条流水线重做：**逐关挑抖动下实测最强的那个老师**（抖动重训不是全面胜利——
-W3 大胜 3-4 44%→78% / 3-1 3%→64%，W1 半胜 1-3 0%→59% 但 1-2 49%→17%，W2 反而变差，
-所以必须一关一关挑）→ 抖动开局重收 840k 帧 → 重蒸学生 → 三种口径评测。
+Redoing the entire pipeline based on the findings above: **pick, per stage, the teacher measured strongest under jitter** (jitter retraining isn't a clean sweep —
+W3 wins big, 3-4 44%→78% / 3-1 3%→64%; W1 half wins, 1-3 0%→59% but 1-2 49%→17%; W2 actually got worse;
+so it has to be picked stage by stage) → re-collect 840k frames with jittered starts → re-distill the student → evaluate under three protocols.
 
-| | 旧口径（送分） | 诚实口径 |
+| | Old protocol (inflated) | Honest protocol |
 |---|---|---|
-| 十二关学生逐关（起点） | 73% | 52.8% |
-| 换成最强老师班底重蒸 | — | **58.7%**（随机采样） |
-| 按关挑推理模式 | — | **73.3%** |
-| 完整游戏连打 | 2.3 关 | 2.5 关 |
+| Twelve-stage student per-stage (starting point) | 73% | 52.8% |
+| Re-distilled from the strongest teacher roster | — | **58.7%** (random sampling) |
+| Inference mode picked per stage | — | **73.3%** |
+| Full-game playthrough | 2.3 stages | 2.5 stages |
 
-三条能带走的结论：
+Three takeaways:
 
-**① 老师→学生的传导差约 6pp。** 老师班底平均 56% → 64.7%，学生 53.8% → 58.7%。
-学生稳定落在老师下方一个固定差值——**想抬学生只能先抬老师**，补数据、加轮次、换网络都绕不过这条。
+**① The teacher→student transfer gap is about 6pp.** Teacher roster average 56% → 64.7%, student 53.8% → 58.7%.
+The student sits stably a fixed gap below the teacher — **the only way to lift the student is to lift the teacher first**; more data, more epochs, a different network can't get around this.
 
-**② argmax 和采样的优劣是逐关分裂的**，而且分裂得极端（`mario_honest12` @ no-op 0-30）：
+**② Which of argmax and sampling is better splits by stage**, and splits extremely (`mario_honest12` @ no-op 0-30):
 
 | | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 | 2-3 | 2-4 | 3-1 | 3-2 | 3-3 | 3-4 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 采样 | 60% | 55% | 62% | 55% | 45% | 10% | 77% | 61% | 51% | 74% | 86% | 68% |
+| Sampling | 60% | 55% | 62% | 55% | 45% | 10% | 77% | 61% | 51% | 74% | 86% | 68% |
 | argmax | 29% | 9% | 24% | **100%** | 56% | 13% | 13% | **100%** | 81% | 83% | **100%** | 93% |
 
-1-4 是 argmax 100% / 采样 55%，1-2 反过来是 argmax 9% / 采样 55%。**按关挑模式**（`run_fullgame.py`
-的 `auto` 打法）把诚实的逐关平均推到 73.3%——跟最上面那个虚高的 73% 数字相同，但这次站得住。
+1-4 is argmax 100% / sampling 55%; 1-2 is the reverse, argmax 9% / sampling 55%. **Picking the mode per stage** (the `auto` mode of `run_fullgame.py`)
+pushes the honest per-stage average to 73.3% — the same as the inflated 73% at the top, but this time it holds up.
 
-**③ 瓶颈收敛成一个单点：2-2。** 按关挑模式之后，连打里前五关的条件成功率是
-1-1 71% / 1-2 79% / 1-3 74% / 1-4 95% / 2-1 84%，然后 **2-2 只有 12%**——48 局里 16 局走到 2-2，
-只有 2 局过掉。按关挑模式救不了它，因为它是必经的单点闸门。
+**③ The bottleneck converges to a single point: 2-2.** After picking modes per stage, the conditional success rates of the first five stages in a playthrough are
+1-1 71% / 1-2 79% / 1-3 74% / 1-4 95% / 2-1 84%, and then **2-2 is only 12%** — 16 of 48 runs reached 2-2,
+and only 2 got past it. Picking modes per stage can't save it, because it's a mandatory single-point gate.
 
-而 2-2 能不能攻下来，取决于一件已经测清楚的事：**那个 argmax 36% 的模型是撞出来的，不是配方产出的**。
-同配方（课程 0-4→8→16→30，各 2M）跑三个种子，argmax 分别是 7% / 12% / 15%，
-**零个复现**（v1 自己重测两次是 35%、36%，很稳）。所以规划时该按配方的可靠产出算：
-**采样 16-22% / argmax 7-15%**，那个 36% 是硬盘上一个能用但不可再生的模型。
+And whether 2-2 can be conquered depends on something already measured clearly: **that argmax-36% model was a lucky hit, not a product of the recipe**.
+Running the same recipe (curriculum 0-4→8→16→30, 2M each) with three seeds gives argmax 7% / 12% / 15%,
+**zero reproductions** (v1 itself re-tested twice at 35% and 36%, very stable). So planning should use the recipe's reliable output:
+**sampling 16-22% / argmax 7-15%**; that 36% is a usable but non-reproducible model on disk.
 
-### 尖解看起来像个脆吸引子——但那是熵奖励干的
+### The sharp solution looks like a fragile attractor — but that's the entropy bonus's doing
 
-改进 2-2 试了六种方法，**每次的失败模式一模一样**：随机策略稳在 22-25%，而那个珍贵的
-argmax 尖解一碰就碎。
+Six methods were tried to improve 2-2, and **the failure mode was identical every time**: the stochastic policy holds steady at 22-25%, while that precious
+argmax sharp solution shatters at the slightest touch.
 
-| 2-2 @ no-op 0-30（N=400） | argmax | 采样 |
+| 2-2 @ no-op 0-30 (N=400) | argmax | Sampling |
 |---|---|---|
-| `mario_22cur_30`（课程撞出来的尖解） | **38%** | 24% |
-| 课程 v2（带 VecNormalize + 12M） | 16% / 2% | 22% / 27% |
-| 三个种子（同配方换随机种子） | 7% / 12% / 15% | 22% / 16% / 17% |
-| 第二个尖解 `seed6` | 25% | 17% |
-| 2-2 专项蒸馏（老师 argmax 开车收数据） | 0% | 1% |
-| Backplay（存档点开局，P=0.5 / 0.75） | 8% / 15% | 25% / 18% |
+| `mario_22cur_30` (sharp solution hit by curriculum) | **38%** | 24% |
+| Curriculum v2 (with VecNormalize + 12M) | 16% / 2% | 22% / 27% |
+| Three seeds (same recipe, different random seed) | 7% / 12% / 15% | 22% / 16% / 17% |
+| Second sharp solution `seed6` | 25% | 17% |
+| 2-2 targeted distillation (teacher argmax drives to collect data) | 0% | 1% |
+| Backplay (start from savestates, P=0.5 / 0.75) | 8% / 15% | 25% / 18% |
 
-当时的结论是"尖解像优化地形里一个很窄的吸引盆，能撞进去、站不稳，出现概率约 1/5，靠运气不靠配方"。
+The conclusion at the time was "the sharp solution is like a very narrow basin of attraction in the optimization landscape: you can stumble into it but can't stay, it appears with probability ~1/5, down to luck rather than recipe".
 
-**这个结论是错的**，下一节是它的更正。真凶不是地形，是我自己一直开着的一个超参。
+**That conclusion was wrong**; the next section is its correction. The real culprit isn't the landscape — it's a hyperparameter I'd left on the whole time.
 
-### 真凶是熵奖励：2-2 从 3% 到 88%
+### The real culprit is the entropy bonus: 2-2 from 3% to 88%
 
-把上一节那六行失败重看一遍，共同点不在数据、不在课表、不在起点分布，而在**它们全都开着
-`ent_coef=0.02`**。这项熵奖励往损失里加的是"让动作分布尽量摊平"的梯度——而 2-2 需要的恰恰相反：
-在鱼缝前把动作压成一条确定的线。**每一次后续训练都在持续溶解任何变尖的策略**，
-所以无论我换什么，它都被推回那个摊平的 20-25% 对冲策略。不是吸引盆窄，是有一只手一直在往外推。
+Looking again at the six failed rows of the previous section, what they share isn't the data, the curriculum, or the start distribution — it's that **all of them had
+`ent_coef=0.02` on**. This entropy bonus adds a gradient to the loss that "flattens the action distribution as much as possible" — and 2-2 needs exactly the opposite:
+pressing the actions into one deterministic line in front of the fish gap. **Every subsequent round of training kept dissolving any policy that got sharp**,
+so whatever I changed, it got pushed back to that flat 20-25% hedging policy. It wasn't a narrow basin; there was a hand constantly pushing outward.
 
-手术很简单，四件事一起做：
+The surgery is simple, four things done together:
 
-| 改动 | 为什么 |
+| Change | Why |
 |---|---|
-| `ent_coef` 0.02 → **0** | 撤掉那只手 |
-| `lr` → **1e-5** | 尖解的邻域很小，大步子会直接迈出去 |
-| 每 **25 万步**存一档 | 好状态是路过的，存疏了会错过 |
-| **按 DET 实测挑档**，不看 `ep_rew_mean` | 后者含梯子塑形奖励，跟真实通关率脱钩 |
+| `ent_coef` 0.02 → **0** | Remove the hand |
+| `lr` → **1e-5** | The neighborhood of the sharp solution is small; big steps walk right out of it |
+| Save a checkpoint every **250k steps** | Good states are passed through; sparse saving misses them |
+| **Pick checkpoints by measured DET**, not `ep_rew_mean` | The latter includes ladder-shaping reward and is decoupled from the real clear rate |
 
-2-2 沿这条路：3% → 34% → 71% → **88%**（N=400，argmax，no-op 0-30）。
-那个"不可再生的 38%"现在是配方产出的 88%。
+2-2 along this path: 3% → 34% → 71% → **88%** (N=400, argmax, no-op 0-30).
+That "non-reproducible 38%" is now a recipe-produced 88%.
 
-**这条教训比 2-2 本身值钱**：熵奖励是这个项目最早那次训练崩溃（run1）的解药，也是后期精度关的毒。
-它不该是全程常数，该随训练阶段退火——前期需要它撑住探索，后期需要它让路。
+**This lesson is worth more than 2-2 itself**: the entropy bonus was the antidote to this project's earliest training collapse (run1), and the poison for the late-stage precision stages.
+It shouldn't be constant throughout; it should be annealed with training phase — early on it's needed to sustain exploration, later it needs to step aside.
 
-**同一手术推到其余十一关，十关涨、两关跌**（N=150 @ no-op 0-30，逐关取最优档 + 最优推理模式）：
+**Pushing the same surgery to the other eleven stages: ten up, two down** (N=150 @ no-op 0-30, best checkpoint + best inference mode per stage):
 
-| | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 | 2-3 | 2-4 | 3-1 | 3-2 | 3-3 | 3-4 | 平均 |
+| | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 | 2-3 | 2-4 | 3-1 | 3-2 | 3-3 | 3-4 | Average |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 手术前 | 68 | 45 | 39 | 82 | 46 | 34 | 84 | 69 | 64 | 85 | 98 | 79 | 66.1 |
-| 手术后 | **93** | 9 ✗ | **100** | **94** | **100** | **88** | 83 ✗ | **98** | **100** | **89** | **100** | **96** | **90.6** |
+| Before surgery | 68 | 45 | 39 | 82 | 46 | 34 | 84 | 69 | 64 | 85 | 98 | 79 | 66.1 |
+| After surgery | **93** | 9 ✗ | **100** | **94** | **100** | **88** | 83 ✗ | **98** | **100** | **89** | **100** | **96** | **90.6** |
 
-当时的解读是"熵为零只对需要精确和坚决的关有效，对 1-2、2-3 这种宽松的关有害"。
-2-3 那半句是对的（重训过，最好 87% vs 起点 83%，在噪声内，它是真到顶了）；
-**1-2 那半句是错的，见下一节**。
+The interpretation at the time was "zero entropy only helps stages that need precision and decisiveness, and hurts lenient stages like 1-2 and 2-3".
+The 2-3 half was right (retrained, best 87% vs 83% starting point, within noise — it really is at its ceiling);
+**the 1-2 half was wrong; see the next section**.
 
-顺带两条口径上的注意：
+Two protocol notes in passing:
 
-- **DET / STO 要逐关挑**。同一份权重，1-3 用 argmax 是 100%、1-1 用采样是 93%。
-  一刀切的评测口径会低估一半的关。
-- **但收蒸馏数据一律用采样**，哪怕老师的 argmax 分数更高（理由见下一节"试过没用的"里那条）。
-  好在熵为零训出来的分布本身就接近 one-hot，采样 ≈ argmax，覆盖靠残余的那点熵。
+- **DET / STO must be picked per stage**. With the same weights, 1-3 is 100% with argmax and 1-1 is 93% with sampling.
+  A one-size-fits-all evaluation protocol underestimates half the stages.
+- **But always collect distillation data with sampling**, even when the teacher's argmax score is higher (see the item in "tried and didn't help" in the next section).
+  Fortunately the distribution trained with zero entropy is itself close to one-hot, so sampling ≈ argmax, with coverage coming from the residual entropy.
 
-### 存档密度本身就是超参：1-2 从 45% 到 88%
+### Checkpoint density is itself a hyperparameter: 1-2 from 45% to 88%
 
-上一节判 1-2「手术有害，45% → 9%」。那个 9% 来自 World 1 混训臂的 3.5M 和 6.25M 档，
-而那条臂**最早的存档是 750k**。单独拿 1-2 重训一遍、每 2.5 万步存一档，真相是：
+The previous section judged 1-2 as "surgery harmful, 45% → 9%". That 9% came from the 3.5M and 6.25M checkpoints of the World 1 mixed-training arm,
+and that arm's **earliest checkpoint was at 750k**. Retraining 1-2 alone with a checkpoint every 25k steps, the truth is:
 
 ```
-起点 55% → 24k 58% → 99k 85% → 149k 89% → …一路 81-91%… → 399k 91% → （之后才开始烧）
+start 55% → 24k 58% → 99k 85% → 149k 89% → …81-91% all along… → 399k 91% → (only starts to burn after this)
 ```
 
-不是尖峰，是一段从 10 万步到 40 万步的宽平台。N=400 复核 **88%**，而且 `noop=0` 和 `noop=30`
-只差 1pp——**一个真正相位无关的策略**（原老师是 83% → 56%，那 27pp 全是背相位的水分）。
+Not a spike, but a wide plateau from 100k to 400k steps. An N=400 re-check gives **88%**, and `noop=0` vs `noop=30`
+differ by only 1pp — **a genuinely phase-independent policy** (the original teacher went 83% → 56%; those 27pp were all inflation from memorizing phase).
 
-⇒ **手术的三件套里，"密存档 + 按实测挑档"才是主角**，熵归零和小 lr 只是让峰值更高。
-对照臂（保留 `ent_coef=0.02`，只改 lr 和存档密度）在同一位置只有 41%，所以熵确实也有贡献，
-但没有前者就什么都看不见。而我给**每一关**都用 750k 当最早的存档点——等于系统性地跳过了
-最可能出成绩的那一段（2-4 的最优档恰好就是最早的 750k，是个边界值，多半也没采到真峰值）。
+⇒ **Of the surgery's three pieces, "dense checkpoints + pick by measurement" is the lead**; zeroing entropy and small lr just raise the peak.
+The control arm (keeping `ent_coef=0.02`, changing only lr and checkpoint density) got only 41% at the same point, so entropy does contribute too,
+but without the former you'd see nothing. And I had used 750k as the earliest checkpoint for **every stage** — systematically skipping
+the stretch most likely to produce results (2-4's best checkpoint happened to be exactly the earliest, 750k, a boundary value that most likely missed the real peak too).
 
-至此十二关老师班底：1-1 93 / 1-2 88 / 1-3 100 / 1-4 94 / 2-1 100 / 2-2 88 /
-2-3 84 / 2-4 98 / 3-1 100 / 3-2 89 / 3-3 100 / 3-4 96，**平均 66.1% → 94.2%**。
+At this point the twelve-stage teacher roster: 1-1 93 / 1-2 88 / 1-3 100 / 1-4 94 / 2-1 100 / 2-2 88 /
+2-3 84 / 2-4 98 / 3-1 100 / 3-2 89 / 3-3 100 / 3-4 96, **average 66.1% → 94.2%**.
 
-同样的细扫推到另外两个**边界档**（它们的最优档恰好是那条臂的第一个或最后一个存档，
-是典型的"峰值在窗口外"信号）：2-4 的 750k 是最早一档 → 细扫发现 7.4 万-22.4 万步整段 **100%**；
-3-2 的 6.25M 是最后一档 → 继续单关训，从 4.9 万步起一路 **100%** 到 60 万步都没掉。
-⇒ 两个边界档都不是峰值，老师均值再升到 95.4%。
-（但这两个更强的老师**没能让学生变好**，反而更差——见下一节的 v8。）
+The same fine sweep was pushed to two other **boundary checkpoints** (their best checkpoint happened to be the first or last of that arm,
+a classic "peak outside the window" signal): 2-4's 750k was the earliest → the fine sweep found **100%** across the whole 74k-224k step range;
+3-2's 6.25M was the last → continued single-stage training, **100%** from 49k steps all the way to 600k without dropping.
+⇒ Neither boundary checkpoint was the peak; the teacher mean rose further to 95.4%.
+(But these two stronger teachers **did not make the student better** — it got worse; see v8 in the next section.)
 
-### 学生：v5 → v6，全通率 17%
+### Student: v5 → v6, full-clear rate 17%
 
-| | 老师均值 | 学生逐关取优 | 连打平均 | 十二关全通 |
+| | Teacher mean | Student per-stage best | Playthrough avg | Twelve-stage full clear |
 |---|---|---|---|---|
-| 起点 | 66% | 61% | 2.3 关 | ~0 |
-| v5（新班底重蒸） | 94% | 84.2% | 5.2 关 | 2% |
-| v6（+ 专项 DAgger） | 94% | 89.7% | 5.5 关 | 17% |
-| **v7（+ 第二轮 DAgger）** | 94% | **91.9%** | **7.1 关** | **20.8%**（96 局里 20 局进 4-1） |
-| v8（+ 更强的 2-4/3-2 老师） | 95% | — | 5.2 关 | 11.5% ✗ |
+| Starting point | 66% | 61% | 2.3 stages | ~0 |
+| v5 (re-distilled with new roster) | 94% | 84.2% | 5.2 stages | 2% |
+| v6 (+ targeted DAgger) | 94% | 89.7% | 5.5 stages | 17% |
+| **v7 (+ second DAgger round)** | 94% | **91.9%** | **7.1 stages** | **20.8%** (20 of 96 runs reached 4-1) |
+| v8 (+ stronger 2-4/3-2 teachers) | 95% | — | 5.2 stages | 11.5% ✗ |
 
-**v8 是个负结果，而且值得记。** 细扫把 2-4 的老师从 98% 抬到 100%、3-2 从 89% 抬到 100%，
-只重收这两关的数据重蒸——结果学生在**没被动过的关**上掉了：2-1 99% → 74%，2-2 59% → 41%，
-连打 7.1 → 5.2 关。⇒ **老师更强不等于学生更好**。那两个新老师是 `ent=0` 训到 100% 的，策略极尖，
-采样出来的轨迹是条窄管道，状态覆盖反而变差。这跟"argmax 开车收数据 11% → 0%"是同一个机制，
-只是这次它伪装成"我换了个更好的老师"。**蒸馏数据要的是覆盖，而给老师打分的指标是通关率，
-这两件事会分叉。**
+**v8 is a negative result, and worth recording.** The fine sweep raised the 2-4 teacher from 98% to 100% and 3-2 from 89% to 100%;
+only those two stages' data were re-collected and re-distilled — and the student dropped on **stages that weren't touched**: 2-1 99% → 74%, 2-2 59% → 41%,
+playthrough 7.1 → 5.2 stages. ⇒ **A stronger teacher doesn't mean a better student**. Those two new teachers were trained to 100% with `ent=0`; the policies are extremely sharp,
+the sampled trajectories form a narrow pipe, and state coverage actually gets worse. This is the same mechanism as "argmax drives to collect data, 11% → 0%",
+just disguised this time as "I switched to a better teacher". **Distillation data needs coverage, while the metric teachers are scored on is clear rate,
+and these two things can diverge.**
 
-v7 连打里的逐关条件成功率（N=96）：1-1 95 / 1-2 97 / 1-3 100 / 1-4 100 / 2-1 99 / **2-2 59** /
-2-3 84 / 2-4 79 / 3-1 100 / 3-2 94 / 3-3 81 / 3-4 77。前五关已经基本不掉了。
+Per-stage conditional success rates in v7 playthroughs (N=96): 1-1 95 / 1-2 97 / 1-3 100 / 1-4 100 / 2-1 99 / **2-2 59** /
+2-3 84 / 2-4 79 / 3-1 100 / 3-2 94 / 3-3 81 / 3-4 77. The first five stages basically no longer drop.
 
-连打里的逐关条件成功率：1-1 94 / 1-2 93 / 1-3 93 / 1-4 98 / 2-1 82 / **2-2 45** /
-2-3 74 / 2-4 86 / 3-1 100 / 3-2 100 / 3-3 92 / 3-4 100。
-连乘是 17.2%，跟实测的 11/64 对得上——**这条链现在是可预测的**，可以直接算下一步该修哪儿
-（2-2 从 45% 到 90%，全通率就从 17% 到约 34%）。
+Per-stage conditional success rates in playthroughs: 1-1 94 / 1-2 93 / 1-3 93 / 1-4 98 / 2-1 82 / **2-2 45** /
+2-3 74 / 2-4 86 / 3-1 100 / 3-2 100 / 3-3 92 / 3-4 100.
+The product is 17.2%, matching the measured 11/64 — **this chain is now predictable**; you can directly compute what to fix next
+(2-2 from 45% to 90% would take the full-clear rate from 17% to about 34%).
 
-三个让它动起来的改动，每一个都推翻了我自己先前的一个结论：
+Three changes made it move, and each one overturned an earlier conclusion of mine:
 
-**① 2-2 的师生落差是误差累积，不是容量。** 老师 89%、v5 学生 45%，41pp——而其他关只差 6pp。
-决定性实验：只喂 2-2 数据单独蒸一个**同架构**学生，也只有 50%（混训 45%，只差 5pp）。
-所以不是被另外十一关挤掉的，是行为克隆在这一关本身就抄不像：champ 是一条精确的低熵轨迹，
-每帧 99% 的准确率摊到 2000 步的一局上就什么都不剩。**专项 DAgger 值 +21pp（48% → 69%）**——
-上一轮十二关 DAgger 只值 +2pp，因为那时天花板在老师身上，现在短板换成了"学生抄不像"。
+**① The 2-2 teacher–student gap is error accumulation, not capacity.** Teacher 89%, v5 student 45%, 41pp — while other stages differ by only 6pp.
+The decisive experiment: distilling a **same-architecture** student on 2-2 data alone also gets only 50% (mixed 45%, only 5pp apart).
+So it wasn't squeezed out by the other eleven stages; behavior cloning simply can't copy this stage faithfully: the champ is a precise low-entropy trajectory,
+and 99% per-frame accuracy spread over a 2000-step run leaves nothing. **Targeted DAgger is worth +21pp (48% → 69%)** —
+the previous twelve-stage DAgger round was worth only +2pp, because back then the ceiling was the teacher; now the weak spot has become "the student can't copy faithfully".
 
-**② ~~跨关清空帧缓冲值 +0.9 关~~ —— 这条后来被更大的样本推翻了，见文末。**
-当时（N=64）测到 `MARIO_FLUSH=1` 把连打从 4.3 拉到 5.2 关、2-2 的连打成功率 15% → 37%，
-我据此写了"一个改动值多少取决于测它时瓶颈在哪儿"。那个方法论没错（双重 /255 是它的实例），
-**但拿这个开关当例子选错了**：把样本加到 N=288，清空/不清空/预热三种做法完全打平。
+**② ~~Flushing the frame buffer across stages is worth +0.9 stages~~ — this was later overturned by a larger sample; see the end of the document.**
+At the time (N=64), `MARIO_FLUSH=1` measured as lifting playthroughs from 4.3 to 5.2 stages and 2-2 playthrough success 15% → 37%,
+and from that I wrote "how much a change is worth depends on where the bottleneck is when you measure it". That methodology isn't wrong (double /255 is an instance of it),
+**but this switch was the wrong example**: raising the sample to N=288, flush / no flush / warm-up all tie exactly.
 
-**③ `run_fullgame.py` 的 `DET_STAGES` 表是跟着模型走的。** v5 上 1-3 翻成 DET 99% / STO 49%，
-照 v4 的旧表打白丢 50pp——我第一次测出「连打只有 2.5 关」就是这个 bug，差点当成真实退步。
-现在改成 `MARIO_DET_STAGES` 环境变量可覆盖，注释里写死了"换模型必须重填"。
+**③ The `DET_STAGES` table in `run_fullgame.py` belongs to the model.** On v5, 1-3 flipped to DET 99% / STO 49%;
+playing with v4's old table throws away 50pp — the first time I measured "playthrough only 2.5 stages" it was this bug, and I nearly took it as a real regression.
+It's now overridable via the `MARIO_DET_STAGES` env var, and the comment states flatly "must be refilled when the model changes".
 
-### 2-2 的最后 30pp：定位对了，修好了单关，但没传导到连打
+### The last 30pp of 2-2: located correctly, fixed single-stage, but didn't carry over to playthroughs
 
-老师 86%、v7 学生 56%，还差 30pp。先问"给 2-2 单独一份参数能不能修"——
-**用现在的全部 2-2 数据（含两轮 DAgger）专门蒸一个同架构学生，只有 64%**（混合学生 56%）。
-⇒ **把整张 686 万参数的网络 100% 专供给 2-2，只买到 8pp**，剩下 22pp 与"参数够不够、
-要不要 MoE / 专家头"无关。（所以 MoE 在这个问题上的天花板就是那 8pp，不值得为它写门控。）
+Teacher 86%, v7 student 56%, still 30pp short. First question: "can giving 2-2 its own parameters fix it" —
+**distilling a dedicated same-architecture student on all current 2-2 data (including two DAgger rounds) gets only 64%** (mixed student 56%).
+⇒ **Devoting the entire 6.86M-parameter network 100% to 2-2 buys only 8pp**; the remaining 22pp has nothing to do with "enough parameters,
+MoE / expert heads or not". (So the ceiling of MoE on this problem is those 8pp — not worth writing gating for.)
 
-那 22pp 是什么？`diag_agreement22.py`：让**老师** argmax 开车，逐帧比对两者的选择：
+What are those 22pp? `diag_agreement22.py`: let the **teacher**'s argmax drive and compare both choices frame by frame:
 
 ```
-x    0-1400   argmax 不一致  5-6%    KL 0.01     ← 前半程几乎逐帧一致
+x    0-1400   argmax disagreement  5-6%    KL 0.01     ← first half nearly identical frame by frame
 x 1400-2000                 14-20%  KL 0.18
-x 2200-2800                 29-30%  KL 0.38-0.47 ← 峰值
-x 3000-3200                  0.4%   KL 0.01     ← 旗杆前的直路
+x 2200-2800                 29-30%  KL 0.38-0.47 ← peak
+x 3000-3200                  0.4%   KL 0.01     ← straight road before the flagpole
 ```
 
-学生自己开车的死亡中位数 x=2214，跟分歧峰值对上。**是局部精度问题，不是表示问题**——
-2-2 全长 3161 像素，均匀采的数据里真正难的那 800 像素分到不足四分之一。
-按这个把 16 万帧 DAgger 标签堆到 x≥1300：**2-2 单关 56% → 74%**（N=300），落差收到 13pp。
+The median death point when the student drives is x=2214, matching the disagreement peak. **It's a local precision problem, not a representation problem** —
+2-2 is 3161 pixels long, and the truly hard 800 pixels get less than a quarter of uniformly sampled data.
+Accordingly piling 160k frames of DAgger labels onto x≥1300: **2-2 single-stage 56% → 74%** (N=300), gap narrowed to 13pp.
 
-⚠️**中途撞到一个更基础的 bug，值得单独记。** 本来想用存档开局（`ArchiveStart`）省掉前半段，
-收完发现学生从 x=1408 起步只有 13% 通关、每局只有 75 帧——离终点更近反而更差。
-做对照才看清：**把老师放到同一批存档点，它从 86% 掉到 argmax 21%，32 帧就死。**
-原因是 `FrameStack` 复位时被填成"同一帧复制四份"，**观测里的速度信息全没了**——
-2-2 是水下关，策略靠 4 帧差分判断鱼往哪游、多快，看到一堆"静止的鱼"就会撞上去。
-那 16 万帧作废重收（改成正常从头打、只记 x≥1300 的帧，分布天然正确）。
-当初记的"存档机制跑通了（开局 x≈1880）"只验证了**位置**对，没验证**状态**可用——这是两回事。
+⚠️**Halfway through I hit a more fundamental bug, worth recording separately.** I originally wanted to use savestate starts (`ArchiveStart`) to skip the first half;
+after collecting, I found the student starting from x=1408 cleared only 13% and each run lasted only 75 frames — closer to the goal yet worse.
+Only a control made it clear: **putting the teacher at the same savestates, it drops from 86% to argmax 21% and dies in 32 frames.**
+The cause: on reset `FrameStack` was filled with "the same frame copied four times", **so all velocity information in the observation was gone** —
+2-2 is an underwater stage; the policy relies on 4-frame differences to judge where and how fast fish are swimming, and seeing a bunch of "stationary fish" it swims right into them.
+Those 160k frames were discarded and re-collected (playing normally from the start, recording only frames with x≥1300, so the distribution is naturally correct).
+The earlier note "savestate mechanism works (start at x≈1880)" only verified the **position** was right, not that the **state** was usable — two different things.
 
-**但单关的 18pp 没有传导到连打**（N=96 网格）：
+**But the 18pp single-stage gain didn't carry over to playthroughs** (N=96 grid):
 
-| 连打平均关数 / 全通率 / 2-2 条件成功率 | v7 | v9（+ 定点 DAgger） |
+| Playthrough avg stages / full-clear rate / 2-2 conditional success | v7 | v9 (+ targeted DAgger) |
 |---|---|---|
-| 带 `MARIO_FLUSH=1` | **7.1 / 20.8% / 59%** | 6.0 / 12.5% / 41% |
-| 不带 | 5.9 / 13.5% / 44% | 6.7 / 17.7% / 59% |
+| With `MARIO_FLUSH=1` | **7.1 / 20.8% / 59%** | 6.0 / 12.5% / 41% |
+| Without | 5.9 / 13.5% / 44% | 6.7 / 17.7% / 59% |
 
-v9 不带 flush 的 2-2 连打成功率 59%，跟 v7 带 flush 的 59% **一模一样**。
+v9's 2-2 playthrough success without flush is 59%, **exactly the same** as v7's 59% with flush.
 
-当时我据此写了"**flush 的符号跟着模型翻**：v6 +0.9 关、v7 +1.2 关、v9 −0.7 关"，
-并推断它是在两种都不对的状态里挑（清空＝同一帧四份没有速度；不清空＝三帧上一关的画面内容错），
-于是实现了第三种做法 `MARIO_PRIME=1`：**进新关时多走 n-1 步、用真实的连续帧把栈填满**再交出控制权
-（`selftest_prime.py` 验过三者的指纹：过关那帧的栈内相邻帧像素差，不处理 42.2 ／ flush 0.000 ／ prime 0.85）。
+At the time I wrote from this that "**flush's sign flips with the model**: v6 +0.9 stages, v7 +1.2 stages, v9 −0.7 stages",
+and inferred it was choosing between two states that are both wrong (flush = the same frame four times, no velocity; no flush = three frames whose content is from the previous stage),
+so I implemented a third approach, `MARIO_PRIME=1`: **on entering a new stage, take n-1 extra steps and fill the stack with real consecutive frames** before handing over control
+(`selftest_prime.py` verified the fingerprints of all three: pixel difference between adjacent frames in the stack on the stage-clear frame — untreated 42.2 / flush 0.000 / prime 0.85).
 
-**结果是个彻底的负结果，而且把上面那句话也一起推翻了。** v7 三条臂各跑 N=288：
+**The result is a complete negative, and it overturns the sentence above too.** v7, three arms, N=288 each:
 
-| v7 @ N=288 | 平均关数 | 十二关全通 | 2-2 条件成功率 |
+| v7 @ N=288 | Avg stages | Twelve-stage full clear | 2-2 conditional success |
 |---|---|---|---|
-| 不处理 | 6.6 | 21.5%（62/288） | 54% |
-| `MARIO_FLUSH=1` | 6.6 | 19.1%（55/288） | 50% |
-| `MARIO_PRIME=1` | 6.5 | 18.4%（53/288） | 51% |
+| Untreated | 6.6 | 21.5% (62/288) | 54% |
+| `MARIO_FLUSH=1` | 6.6 | 19.1% (55/288) | 50% |
+| `MARIO_PRIME=1` | 6.5 | 18.4% (53/288) | 51% |
 
-**三者完全打平，名义上最好的是"什么都不做"。** 预热在机制上更干净，收益是零。
-⇒ 撤回两条：「跨关清空值 +0.9 关」是 N=64 的噪声；「符号跟着模型翻」是拿两个各自不显著的
-差（1.35σ 和 1.0σ）拼出来的假结论。**N=96 分辨不了 5pp 量级的差**——同一组配置在
-N=96 下是 20.8% / 2-2 59%，到 N=288 变成 19.1% / 50%，偏高了约 7pp。
-（这是本项目第二次栽在"用小样本挑方向、却拿它下结论"上，第一次是 N=30 的消融。）
+**All three tie exactly; nominally the best is "do nothing".** Priming is mechanistically cleaner, and its gain is zero.
+⇒ Two retractions: "flushing across stages is worth +0.9 stages" was N=64 noise; "the sign flips with the model" was a fake conclusion stitched from two individually insignificant
+differences (1.35σ and 1.0σ). **N=96 can't resolve differences of order 5pp** — the same configuration gave
+20.8% / 2-2 59% at N=96 and 19.1% / 50% at N=288, about 7pp too high.
+(This is the second time this project tripped on "using a small sample to pick a direction, then drawing a conclusion from it"; the first was the N=30 ablation.)
 
-**但这不推翻存档开局那个发现**（老师 86% → argmax 21%），两者可以并存且解释得通：
-过关时马里奥出生在 x≈40、周围什么都没有，三帧退化的观测不要钱；而 x=1408 是在 2-2 水下、
-身边全是鱼，同样三帧就是致命的。**同一个缺陷，代价取决于它发生在哪里。**
+**But this doesn't overturn the savestate-start finding** (teacher 86% → argmax 21%); the two can coexist and make sense together:
+on a stage clear Mario spawns at x≈40 with nothing around, so three degraded frames cost nothing; while x=1408 is underwater in 2-2,
+surrounded by fish, and the same three frames are fatal. **The same defect; the cost depends on where it happens.**
 
-当前最好的仍是 **v7，连打 6.6 关 / 十二关全通 21.5%（N=288，不带任何过关处理）**。
+The current best is still **v7, playthrough 6.6 stages / twelve-stage full clear 21.5% (N=288, no stage-transition treatment)**.
 
-### argmax 评测的有效样本量是「相位数」，不是「局数」
+### The effective sample size of argmax evaluation is "number of phases", not "number of runs"
 
-追查"v9 的 2-2 单关涨了、连打没涨"时，逐个固定相位扫了一遍（`diag_phase_scan.py`，
-`MARIO_NOOP_EXACT=1` 让空按帧数取**恰好** k 而不是 0~k 随机）：
-
-```
-v9 @ 2-2   空按 0 帧 0% │ 1 帧 0% │ 2 帧 100% │ 3 帧 100% │ … │ 30 帧 0%
-           21/31 个相位满分，10/31 个相位全灭，没有一个中间值（每相位 60 局）
-v7 @ 2-2   18/31 满分，13/31 全灭，同样没有中间值
-```
-
-**每个相位要么 100% 要么 0%。** 机制上是必然的——确定性模拟器 + argmax + 固定相位
-＝ 每局轨迹逐帧相同。但摆出来才看清：
-
-> **「argmax + noop 0-30、N=300」实际是「31 个相位里过了几个」。有效样本量 31，标准误 ±9pp。**
-
-我这几天所有 argmax 数字都要按这个重读——存档档位之间的大幅跳动、v8"更差"、
-v9"没传导"、flush"符号翻转"，很大一部分就是这一个原因。**每跑 300 局，其中 269 局
-是在重复已经知道的答案。**
-
-按这个重算：v7 18/31 vs v9 21/31 = 0.8σ，**两个模型在 2-2 上分不开**；
-整体连打 21.5% vs 18.1% = 1.0σ，也分不开。
-
-**想靠加宽 noop 窗口换取更多相位样本，在这里行不通。** 扫到 240 个相位后两个模型都掉到 27%，
-但那个数不能用——我一开始解释成"状态在漂"（水下不划水会下沉），
-`diag_noop_drift.py` 一测**否掉了自己这个解释**：
+While chasing "v9's 2-2 single-stage went up but the playthrough didn't", I scanned fixed phases one by one (`diag_phase_scan.py`,
+`MARIO_NOOP_EXACT=1` makes the no-op frame count **exactly** k rather than random in 0~k):
 
 ```
-空按帧数    x     y   剩余时间
-     0     40   184      400     ← 起始在水中
-    20     40    80      399     ← 20 帧就沉到底了
-   200     40    79      390     ← 之后 y 恒定，时间只少 10/400
+v9 @ 2-2   no-op 0 frames 0% │ 1 frame 0% │ 2 frames 100% │ 3 frames 100% │ … │ 30 frames 0%
+           21/31 phases perfect, 10/31 phases wiped out, not a single value in between (60 runs per phase)
+v7 @ 2-2   18/31 perfect, 13/31 wiped out, likewise no values in between
 ```
 
-y 和 time 在 30 帧后都不再变，所以 40-239 是**纯相位变化**。更符合数据的解释是：
-这些模型都用 `MARIO_NOOP=30` 训，只见过 0-30 这 31 个相位，**40 以上全是分布外的**——
-它们并没有学出相位无关的策略，只是学会了应付训练时见过的那 31 个相位。
+**Every phase is either 100% or 0%.** Mechanistically it's inevitable — deterministic emulator + argmax + fixed phase
+= every run's trajectory is identical frame by frame. But only laying it out made it clear:
 
-**落到工程上**（`eval_noop_audit.py` 已改）：argmax 模式下逐个相位各跑一局、报 `k/(noop+1)`，
-同样算力有效样本量大几十倍（2-2 那格从 300 局变 31 局，结果完全一致：v7 58%、v9 68%）。
-要真正可靠的数字就**用采样口径**——那才是每局独立、N 就是 N。
+> **"argmax + noop 0-30, N=300" is really "how many of 31 phases pass". Effective sample size 31, standard error ±9pp.**
 
-### 训练的相位窗口就是相位鲁棒性的天花板
+All my argmax numbers from these past days need rereading in this light — the big jumps between checkpoints, v8 "worse",
+v9 "didn't carry over", flush "sign flip": a large part of it is this one cause. **Of every 300 runs, 269
+are repeating an answer already known.**
 
-上一节的结论——"模型只学会了应付训练时见过的那 31 个相位"——是可以直接验的：
-把 2-2 冠军 `mario_22champ` 的训练窗口从 `MARIO_NOOP=30` 拉到 **120**，续训 4M 步，
-每 25 万步存档，逐档扫全部 121 个相位。
+Recomputed accordingly: v7 18/31 vs v9 21/31 = 0.8σ, **the two models can't be separated on 2-2**;
+overall playthrough 21.5% vs 18.1% = 1.0σ, also inseparable.
 
-| 2-2 | 全 0-120 | 相位 0-30（旧窗口内） | 相位 31-120（窗口外） |
+**Widening the noop window to get more phase samples doesn't work here.** Scanning 240 phases, both models drop to 27%,
+but that number is unusable — I first explained it as "the state drifts" (underwater without swimming you sink);
+`diag_noop_drift.py` **refuted my own explanation** in one measurement:
+
+```
+no-op frames  x     y   time left
+     0     40   184      400     ← starts in the water
+    20     40    80      399     ← sunk to the bottom within 20 frames
+   200     40    79      390     ← y constant after that, time down only 10/400
+```
+
+y and time stop changing after 30 frames, so 40-239 are **pure phase changes**. The explanation that fits the data better:
+these models were all trained with `MARIO_NOOP=30` and have only seen the 31 phases 0-30; **everything above 40 is out of distribution** —
+they didn't learn a phase-independent policy, just learned to handle the 31 phases seen in training.
+
+**In engineering terms** (`eval_noop_audit.py` updated): in argmax mode, run one game per phase and report `k/(noop+1)`;
+for the same compute the effective sample size is dozens of times larger (the 2-2 cell went from 300 runs to 31, with identical results: v7 58%, v9 68%).
+For truly reliable numbers **use the sampling protocol** — there each run is independent and N really is N.
+
+### The training phase window is the ceiling on phase robustness
+
+The previous section's conclusion — "the model only learned to handle the 31 phases seen in training" — can be tested directly:
+widen the training window of the 2-2 champion `mario_22champ` from `MARIO_NOOP=30` to **120**, continue training for 4M steps,
+checkpoint every 250k steps, and scan all 121 phases for each checkpoint.
+
+| 2-2 | All 0-120 | Phases 0-30 (inside old window) | Phases 31-120 (outside window) |
 |---|---|---|---|
-| champ（窗口 0-30 训） | 49.6% | **87%**（27/31） | 37% |
-| 宽窗口 250k | 42% | 65% | 34% |
-| 宽窗口 1.75M | 55% | 84% | 46% |
-| 宽窗口 4M（最好档） | **58%** | 81%（25/31） | **50%** |
+| champ (trained on window 0-30) | 49.6% | **87%** (27/31) | 37% |
+| Wide window 250k | 42% | 65% | 34% |
+| Wide window 1.75M | 55% | 84% | 46% |
+| Wide window 4M (best checkpoint) | **58%** | 81% (25/31) | **50%** |
 
-**窗口外 37% → 50%，窗口内差 2 个相位（在 N=31 的噪声里）**，而且最后一档仍是最好的，没收敛。
-早期档位（250k）窗口内一度掉到 65% 再爬回来——先破坏再重建，跟熵为零那条曲线同形。
+**Outside the window 37% → 50%, inside the window 2 phases apart (within the N=31 noise)**, and the last checkpoint is still the best — not converged.
+An early checkpoint (250k) dropped to 65% inside the window before climbing back — break first, then rebuild, the same shape as the zero-entropy curve.
 
-⚠️**单点比较不可靠**：最终保存的模型和它前一档只差 256 步（同一个 rollout 内），
-却翻掉了 3 个窗口内相位、7 个窗口外相位（81%/58% → 71%/52%）。
-argmax 策略对权重就是这么敏感——**要看 16 个档的趋势，不要看某两个模型的对比**。
+⚠️**Single-point comparisons are unreliable**: the final saved model and the checkpoint before it differ by only 256 steps (within the same rollout),
+yet 3 in-window phases and 7 out-of-window phases flipped (81%/58% → 71%/52%).
+argmax policies are that sensitive to weights — **look at the trend across 16 checkpoints, not a comparison of two models**.
 
-**但这对项目的主指标没有帮助，而这才是重点。** 诚实基准的口径就是 no-op 0-30，
-在那个窗口里两个模型分不开。也就是说：
+**But this doesn't help the project's primary metric, and that's the point.** The honest benchmark's protocol is no-op 0-30,
+and within that window the two models are inseparable. In other words:
 
-> **是基准本身让"背下 31 个相位"成为可行策略。** 训练窗口和评测窗口同为 0-30，
-> 模型只要覆盖那 31 个相位就能拿满分，不需要真的学会看鱼。
+> **It's the benchmark itself that makes "memorize 31 phases" a viable strategy.** With training and evaluation windows both 0-30,
+> a model only has to cover those 31 phases to score perfectly, without really learning to watch the fish.
 
-这跟「no-op starts」那一课同构，只是深了一层：当时发现"每局同一相位"让背轨迹可行，
-于是加了 0-30 抖动；现在发现 **0-30 抖动同样可以被背下来，只是要背 31 遍**。
+This is isomorphic to the "no-op starts" lesson, just one layer deeper: back then I found "the same phase every run" made memorizing trajectories viable,
+so I added 0-30 jitter; now I find **0-30 jitter can be memorized just the same, it just takes 31 memorizations**.
 
-**采用的做法（双口径）**：`eval_noop_audit.py` 新增 `robust:<模型列表>` spec，同时报
-**0-30（对外可比的主指标，Atari 标准）** 和 **0-120（鲁棒性副指标，不被记忆策略刷高）**。
-主指标不动是为了保住可比性，副指标是为了让"真的会玩"这件事有地方体现。
+**Adopted approach (dual protocol)**: `eval_noop_audit.py` adds a `robust:<model list>` spec that reports both
+**0-30 (the externally comparable primary metric, Atari standard)** and **0-120 (a robustness secondary metric that memorizing policies can't inflate)**.
+The primary metric stays to preserve comparability; the secondary metric gives "actually knows how to play" somewhere to show up.
 
-**续训到 9.25M 之后：两个指标可以都要，不是权衡。** 从 4M 那档再续 6M（同配方，每 25 万存档），
-24 档逐档扫 121 个相位，最好的是 5.25M 那档（`mario_22robust.zip`）：
+**After continuing to 9.25M: you can have both metrics; it's not a trade-off.** Continuing another 6M from the 4M checkpoint (same recipe, checkpoint every 250k),
+scanning 121 phases for each of 24 checkpoints, the best is the 5.25M one (`mario_22robust.zip`):
 
-| 2-2 | 0-120 全 | 相位 0-30（主指标） | 相位 31-120（鲁棒性） |
+| 2-2 | All 0-120 | Phases 0-30 (primary) | Phases 31-120 (robustness) |
 |---|---|---|---|
-| `mario_22champ`（原始） | 50% | **87%**（27/31） | 37% |
-| **`mario_22robust`（宽窗口）** | **66%** | 84%（26/31） | **60%** |
+| `mario_22champ` (original) | 50% | **87%** (27/31) | 37% |
+| **`mario_22robust` (wide window)** | **66%** | 84% (26/31) | **60%** |
 
-主指标差 1 个相位（无法区分），鲁棒性 **+23pp（3.1σ）**，整体 0-120 **+16pp（2.7σ）**。
-⚠️我在只看前 7 档时写过"训得越久窗口内越差、是在用主指标换鲁棒性"——**那个结论是错的**，
-全部 24 档看下来窗口内在 65-84% 之间震荡、最好的晚期档回到 84%。
-配上密集存档 + 逐档挑选，两个指标都能要。
-（**"点太少就读趋势"在这个项目里已经栽了三次**：N=30 的消融、N=96 的 flush、这次的 7 档。）
+Primary metric 1 phase apart (indistinguishable), robustness **+23pp (3.1σ)**, overall 0-120 **+16pp (2.7σ)**.
+⚠️When I had only looked at the first 7 checkpoints I wrote "the longer it trains the worse inside the window — it's trading the primary metric for robustness" — **that conclusion was wrong**;
+across all 24 checkpoints the in-window score oscillates between 65-84%, and the best late checkpoint is back at 84%.
+With dense checkpoints + per-checkpoint selection, you can have both metrics.
+(**"Reading a trend from too few points" has now bitten this project three times**: the N=30 ablation, the N=96 flush, and these 7 checkpoints.)
 
-### 记忆成分只集中在四关，八关的老师本来就是相位无关的
+### Memorization is concentrated in four stages; eight stages' teachers were phase-independent all along
 
-把双口径体检推给整套十二关老师班底（`diag_phase_scan.py` 新增 `MARIO_PAIRS="1-1:a.zip,..."`，
-每个模型在它自己那一关上扫）。⚠️**相位扫描只对 argmax 有意义**——采样模式下每局独立，
-不存在"逐相位非 0 即 100"，那三关（1-1 / 1-2 / 2-3）要用随机 0-120 单独测。
+Pushing the dual-protocol checkup to the whole twelve-stage teacher roster (`diag_phase_scan.py` adds `MARIO_PAIRS="1-1:a.zip,..."`,
+each model scanned on its own stage). ⚠️**Phase scanning is only meaningful for argmax** — in sampling mode each run is independent,
+there's no "per phase either 0 or 100", so those three stages (1-1 / 1-2 / 2-3) are measured separately with random 0-120.
 
-| 有落差（记忆成分大） | 主指标 0-30 | 鲁棒性 31-120 | 落差 |
+| With a gap (large memorization component) | Primary 0-30 | Robustness 31-120 | Gap |
 |---|---|---|---|
 | **3-2** | 100% | 30% | **−70** |
-| **1-2**（采样） | 85% | 52% | **−33** |
+| **1-2** (sampling) | 85% | 52% | **−33** |
 | **3-4** | 94% | 68% | **−26** |
-| 2-2（已做宽窗口，原 87/37） | 84% | 60% | −24 |
+| 2-2 (wide window already done, originally 87/37) | 84% | 60% | −24 |
 
-| 无落差（八关） |
+| No gap (eight stages) |
 |---|
-| 1-1（采样）92/93 · 1-3 100/100 · 1-4 90/87 · 2-1 100/98 · 2-3（采样）79/82 · 2-4 100/100 · 3-1 100/100 · 3-3 100/100 |
+| 1-1 (sampling) 92/93 · 1-3 100/100 · 1-4 90/87 · 2-1 100/98 · 2-3 (sampling) 79/82 · 2-4 100/100 · 3-1 100/100 · 3-3 100/100 |
 
-**十二关里八关的老师本来就是相位无关的**，"背相位"不是普遍现象，它集中在四关：
-1-2、2-2、3-2、3-4。而这四关的共同点正是当初那条规律——**有移动威胁、且时序可以被锁死**。
+**Eight of the twelve stages' teachers were phase-independent all along**; "memorizing phase" isn't universal, it's concentrated in four stages:
+1-2, 2-2, 3-2, 3-4. And what these four share is exactly the earlier rule — **moving threats, with timing that can be locked in**.
 
-两个值得单独记的点：
+Two points worth recording separately:
 
-- **3-2 的 100% 有七成是相位**。它是"边界档细扫"那一轮刚拿到的满分，看着无懈可击，
-  出了训练窗口只剩 30%。⇒ **主指标满分不代表没问题，只代表这个指标问不出问题。**
-- **采样策略天然不吃相位记忆**：1-1 是 92%→93%、2-3 是 79%→82%，一点不掉。
-  道理很简单——采样本身带随机性，动作序列没法跟鱼的位置逐帧锁死。
-  （例外是 1-2 的 −33pp：采样也拦不住它，那关的落差另有原因，待查。）
+- **70% of 3-2's 100% is phase**. It had just scored perfectly in the "boundary checkpoint fine sweep" round and looked flawless,
+  but outside the training window it's only 30%. ⇒ **A perfect primary metric doesn't mean there's no problem, only that this metric can't ask about it.**
+- **Sampling policies are naturally immune to phase memorization**: 1-1 92%→93%, 2-3 79%→82%, no drop at all.
+  The reason is simple — sampling carries its own randomness, so the action sequence can't lock frame by frame to the fish positions.
+  (The exception is 1-2's −33pp: sampling doesn't stop it either; that stage's gap has another cause, to be investigated.)
 
-### 推广结果：四关全部收口，主指标不降反升
+### Rollout results: all four stages closed, primary metric up rather than down
 
-把宽窗口配方（`MARIO_NOOP=120` + `ent=0` + `lr=1e-5` + 每 25 万存档 + 逐档按实测挑）
-推给有落差的四关：
+Pushing the wide-window recipe (`MARIO_NOOP=120` + `ent=0` + `lr=1e-5` + checkpoint every 250k + pick each checkpoint by measurement)
+to the four stages with gaps:
 
-| 关卡 | 推广前 主指标/鲁棒性 | **推广后** | 产物 |
+| Stage | Before: primary/robustness | **After** | Artifact |
 |---|---|---|---|
 | **3-2** | 100% / 48% | **100% / 100%** | `mario_32robust.zip` |
 | **3-4** | 94% / 74% | **100% / 100%** | `mario_34robust.zip` |
-| **1-2**（采样） | 87% / 55% | **95% / 94%** | `mario_12robust.zip` |
+| **1-2** (sampling) | 87% / 55% | **95% / 94%** | `mario_12robust.zip` |
 | 2-2 | 87% / 37% | 84% / 60% | `mario_22robust.zip` |
 
-**三关做到了 0-120 全窗口满分，而且主指标不降反升**（3-4 94→100、1-2 87→95）。
-所以"记忆成分"不是必须付出的代价，它是训练窗口太窄的副产物——窗口一开，
-策略被迫学会真的看敌人，两个指标一起涨。
+**Three stages reached a perfect score across the full 0-120 window, and the primary metric went up rather than down** (3-4 94→100, 1-2 87→95).
+So the "memorization component" isn't a price you must pay; it's a byproduct of an overly narrow training window — open the window,
+and the policy is forced to really watch the enemies, and both metrics rise together.
 
-只有 **2-2 还剩 24pp 落差**（84/60），它吃了 9.25M 步宽窗口训练仍未收口——
-再次印证它是这十二关里唯一真正难的一关。
+Only **2-2 still has a 24pp gap** (84/60); it took 9.25M steps of wide-window training and still didn't close —
+confirming again that it's the only truly hard stage of these twelve.
 
-两个形状上的观察：
+Two observations on shape:
 
-- **3-2 和 3-4 是"平台"，1-2 是"尖峰"**。3-2 从约 2.25M 起连续 18 个存档都是 100/100，
-  3-4 也有 12 档的平台；而 1-2 在 2M 冲到 99/96 之后，2.5M 开始烧、3.5M 掉到个位数、
-  6M 归零。**跑满步数拿到的最终模型是 0%**——没有密集存档，这一关什么都拿不到。
-- 这已经是同一个形状第三次出现（2-2 熵为零、1-2 的 0-30 窗口、1-2 的宽窗口）：
-  **"先冲顶再烧掉"是这条流水线的常态，而不是异常。模型选择是配方的一部分，不是收尾工作。**
+- **3-2 and 3-4 are "plateaus", 1-2 is a "spike"**. 3-2 was 100/100 for 18 consecutive checkpoints from about 2.25M on,
+  and 3-4 also had a 12-checkpoint plateau; while 1-2, after shooting to 99/96 at 2M, started burning at 2.5M, fell to single digits at 3.5M,
+  and hit zero at 6M. **The final model after running all the steps is 0%** — without dense checkpoints you'd get nothing on this stage.
+- This is the third time the same shape has appeared (2-2 with zero entropy, 1-2 in the 0-30 window, 1-2 in the wide window):
+  **"peak then burn" is the norm for this pipeline, not an anomaly. Model selection is part of the recipe, not cleanup.**
 
-### 2-2 的主指标至此挡住六条路，方向转向鲁棒性
+### 2-2's primary metric has now blocked six paths; direction shifts to robustness
 
-想把"定点 DAgger"（当初值 +18pp 的那招）在宽窗口下重做，**先重跑诊断，结果否掉了这个计划**
-（照抄上次的 `x≥1300` 会白跑一轮）：换成 `mario_22robust` 当老师后，
-学生与老师的 argmax 分歧变成**全程均匀 43%**（对 champ 时是前半程 5-6%、后半段峰值 30%）：
+I wanted to redo "targeted DAgger" (the trick worth +18pp back then) under the wide window. **Rerunning the diagnostic first refuted the plan**
+(copying last time's `x≥1300` would have wasted a round): with `mario_22robust` as the teacher,
+student–teacher argmax disagreement became **a uniform 43% throughout** (against champ it was 5-6% in the first half, peaking at 30% in the second):
 
 ```
 x    0- 200  36%   x 1400-1600  49%   x 2600-2800  54%
 x  800-1000  46%   x 2200-2400  51%   x 3000-3200   9%
 ```
 
-不再是局部问题——`mario_22robust` 是个**打法不同**的策略，v7 学生（champ 那一代数据蒸的）
-在整关每一处都跟它不一致，"分歧集中"这个前提没了。
+It's no longer a local problem — `mario_22robust` is a policy with a **different play style**; the v7 student (distilled on champ-generation data)
+disagrees with it everywhere in the stage, so the premise of "concentrated disagreement" is gone.
 
-更关键的是**这条路对主指标本来就没有价值**：robust 在部署窗口 0-30 上是 84%、champ 是 87%，
-robust 的优势全在窗口之外。学生学不过老师，换老师最好也只是打平；
-而宽窗口采集还会带进大量"开局已沉底"的状态，那种状态在连打里根本不出现（连打是正常入场）。
+More importantly, **this path has no value for the primary metric anyway**: in the deployment window 0-30 robust is 84% and champ 87%;
+robust's advantage is entirely outside the window. The student can't beat the teacher, so switching teachers at best ties;
+and wide-window collection also brings in lots of "already sunk to the bottom at the start" states that never occur in playthroughs (playthroughs enter normally).
 
-**2-2 的主指标至此挡住六条路**：RL 微调、KL 锚、MoE/专家头、第二轮 DAgger、宽窗口、
-定点 DAgger（单关 +18pp 但不传导到连打）。剩下唯一没试的是"连打时 2-2 换用老师权重"，
-但那是**改口径而不是解决问题**——会放弃"一个网络打完十二关"这个整条路线的立意。
+**2-2's primary metric has now blocked six paths**: RL fine-tuning, KL anchor, MoE/expert heads, a second DAgger round, wide window,
+targeted DAgger (+18pp single-stage but doesn't carry over to playthroughs). The only one left untried is "switch to the teacher's weights for 2-2 during playthroughs",
+but that's **changing the protocol, not solving the problem** — it would give up the premise of the whole approach, "one network plays all twelve stages".
 
-⇒ **方向转向鲁棒性指标**：它是唯一还在稳定产出的方向（已有三关做到 0-120 全窗口满分）。
-按余量铺开剩下的关：2-3（82%）、1-4（87%）、1-1（93%）各一条，2-2 再加 8M；
-另外四关（1-3 / 2-4 / 3-1 / 3-3）已是 98-100%，没有余量，不跑。
-启动脚本 `launch_wide4.sh`（每条独立 `setsid`——串联启动时后面几条会被父 shell 带走，踩过多次）。
+⇒ **Direction shifts to the robustness metric**: it's the only direction still producing steadily (three stages already perfect across the full 0-120 window).
+Roll out the remaining stages by headroom: 2-3 (82%), 1-4 (87%), 1-1 (93%) one run each, plus another 8M for 2-2;
+the other four stages (1-3 / 2-4 / 3-1 / 3-3) are already 98-100%, no headroom, not run.
+Launch script `launch_wide4.sh` (each run in its own `setsid` — when launched in series, the later ones get taken down with the parent shell; hit this many times).
 
-### 铺满十二关的结果：主指标 97.5% / 鲁棒性 95.3%，十一关双满
+### Results of covering all twelve stages: primary 97.5% / robustness 95.3%, eleven stages perfect on both
 
-按余量把宽窗口配方铺给剩下有空间的关（1-3 / 2-4 / 3-1 / 3-3 已是 98-100%，不跑）：
+Rolling the wide-window recipe out to the remaining stages with headroom (1-3 / 2-4 / 3-1 / 3-3 already at 98-100%, not run):
 
-| 关卡 | 推广前 主指标/鲁棒性 | **推广后** | 产物 |
+| Stage | Before: primary/robustness | **After** | Artifact |
 |---|---|---|---|
-| **1-1**（采样） | 92% / 93% | **100% / 100%** | `mario_11robust.zip` |
+| **1-1** (sampling) | 92% / 93% | **100% / 100%** | `mario_11robust.zip` |
 | **1-4** | 90% / 88% | **100% / 100%** | `mario_14robust.zip` |
-| **2-3**（采样） | 79% / 82% | **91% / 91%** | `mario_23robust.zip` |
-| 2-2（再续 8M） | 84% / 60% | 崩了，见下 | 保留 `mario_22robust` |
+| **2-3** (sampling) | 79% / 82% | **91% / 91%** | `mario_23robust.zip` |
+| 2-2 (another 8M) | 84% / 60% | Collapsed, see below | Keep `mario_22robust` |
 
-**⚠️2-3 那关我两次判过"到顶了、保留原版"（都是在 0-30 窗口下测的），宽窗口一开就 79%→91%。**
-那个判断也得撤回——它不是到顶，是**那个指标问不出更多东西**。
+**⚠️Twice I judged 2-3 as "at its ceiling, keep the original" (both measured in the 0-30 window); open the wide window and it's 79%→91%.**
+That judgment has to be retracted too — it wasn't at its ceiling; **that metric just couldn't ask any more**.
 
-**2-2 的续训是负结果**：从 `mario_22robust`（84/60）再训 8M，250k 时 65/52，
-1.5-2M 一路归零，3M 只回到 32/27，**全程没有一档超过起点**。它在 9.25M 时就已过峰，
-再训是烧。`mario_22robust` 84%/60% 就是这一关的上限。
+**Continued 2-2 training is a negative result**: training another 8M from `mario_22robust` (84/60) gave 65/52 at 250k,
+dropped to zero over 1.5-2M, and only got back to 32/27 at 3M — **no checkpoint along the way exceeded the starting point**. It was already past its peak at 9.25M;
+more training is burning. `mario_22robust` at 84%/60% is this stage's ceiling.
 
-**十二关最终班底**（主指标 = no-op 0-30，鲁棒性 = 0-120）：
+**Final twelve-stage roster** (primary = no-op 0-30, robustness = 0-120):
 
-| | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 | 2-3 | 2-4 | 3-1 | 3-2 | 3-3 | 3-4 | 平均 |
+| | 1-1 | 1-2 | 1-3 | 1-4 | 2-1 | 2-2 | 2-3 | 2-4 | 3-1 | 3-2 | 3-3 | 3-4 | Average |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 主指标 | 100 | 95 | 100 | 100 | 100 | **84** | 91 | 100 | 100 | 100 | 100 | 100 | **97.5** |
-| 鲁棒性 | 100 | 94 | 100 | 100 | 98 | **60** | 91 | 100 | 100 | 100 | 100 | 100 | **95.3** |
+| Primary | 100 | 95 | 100 | 100 | 100 | **84** | 91 | 100 | 100 | 100 | 100 | 100 | **97.5** |
+| Robustness | 100 | 94 | 100 | 100 | 98 | **60** | 91 | 100 | 100 | 100 | 100 | 100 | **95.3** |
 
-**十一关在两个口径上都是 91-100%，只剩 2-2 一关（84/60）。**
-对照这条线的起点——2026-08-20 时老师平均 66%、而且那 66% 里有一大块是背相位——
-现在是**主指标 97.5%、且这个成绩在四倍宽的相位窗口下基本不掉**。
+**Eleven stages are at 91-100% under both protocols; only 2-2 remains (84/60).**
+Compared with where this line started — on 2026-08-20 the teacher average was 66%, and a big chunk of that 66% was memorized phase —
+it's now **97.5% on the primary metric, and that score basically holds under a phase window four times wider**.
 
-### v10：用 robust 班底重蒸，逐关 95.8%（十关满分），但连打全通率掉一半
+### v10: re-distilled from the robust roster, 95.8% per-stage (ten stages perfect), but playthrough full-clear rate halves
 
-v8 那次失败我归因为"老师更强但更尖 → 采样轨迹是窄管道 → 状态覆盖差"。
-这条归因给出一个可证伪的预测：**宽窗口老师应该反过来蒸得更好**——它们被迫在 121 个相位下都能打，
-行为必然更多样，覆盖更宽。v10 就是这个预测的检验（全十二关重收 840k 帧 + 24 万帧 DAgger，
-采集窗口固定 0-30 以保证只变"老师代际"一个变量）。
+I attributed the v8 failure to "teacher stronger but sharper → sampled trajectories form a narrow pipe → poor state coverage".
+That attribution makes a falsifiable prediction: **wide-window teachers should distill better, the other way round** — they're forced to play under all 121 phases,
+so their behavior must be more diverse and coverage wider. v10 is the test of that prediction (re-collect 840k frames across all twelve stages + 240k frames of DAgger,
+collection window fixed at 0-30 so that only the one variable, "teacher generation", changes).
 
-收集期间老师的采样通关率 **88%**（v5 那轮 78.5%），蒸馏 loss 0.573（v7 那代 0.641）。
+During collection the teachers' sampling clear rate was **88%** (78.5% in the v5 round), and distillation loss was 0.573 (0.641 for the v7 generation).
 
 | | v7 | **v10** |
 |---|---|---|
-| 逐关取优 | 91.9% | **95.8%**（十关 100%，只剩 2-2 67 / 2-3 83） |
-| argmax 十二关均 | 77% | **95%** |
-| 连打 World 1 | 95/97/96/99，死 156 次 | **100/100/100/100，288 局零死亡** |
-| 平均通关关数 | 6.6 | 6.8 |
-| **十二关全通（N=288）** | **21.5%** | 10.4% |
+| Per-stage best | 91.9% | **95.8%** (ten stages 100%, only 2-2 67 / 2-3 83 left) |
+| argmax twelve-stage mean | 77% | **95%** |
+| Playthrough World 1 | 95/97/96/99, 156 deaths | **100/100/100/100, zero deaths in 288 runs** |
+| Avg stages cleared | 6.6 | 6.8 |
+| **Twelve-stage full clear (N=288)** | **21.5%** | 10.4% |
 
-**预测对了一半。** 单关能力确实大涨（+3.9pp，十关满分，World 1 在连打里零死亡是第一次），
-**但连打全通率掉了一半**。而掉的位置高度一致——2-1（单关 100%，连打死 254 次 vs v7 的 10 次）、
-2-4（100→67）、3-3（100→68）、3-4（100→65），**全是"单关满分、进连打就塌"的关**。
+**The prediction was half right.** Single-stage ability really jumped (+3.9pp, ten stages perfect, zero deaths in World 1 during playthroughs for the first time),
+**but the playthrough full-clear rate halved**. And the drops are highly consistent in location — 2-1 (100% single-stage, 254 playthrough deaths vs v7's 10),
+2-4 (100→67), 3-3 (100→68), 3-4 (100→65), **all stages that are "perfect single-stage, collapse in a playthrough"**.
 
-最能统一解释的还是同一条规律，只是这次它出现在**学生**那一层：
-**老师更干净 → 学生更尖 → 对没见过的入场条件更不耐受。** v7 的数据来自更差的老师、更嘈杂，
-覆盖反而更宽。⇒ 那条归因**成立，但它同时解释了 v10 为什么在连打里更差**——我当初只预期了正面。
+The most unifying explanation is the same rule again, only this time appearing at the **student** layer:
+**cleaner teacher → sharper student → less tolerant of unseen entry conditions.** v7's data came from worse, noisier teachers,
+yet had wider coverage. ⇒ That attribution **holds, but it also explains why v10 is worse in playthroughs** — I had only anticipated the positive side.
 
-**中途否掉的两个自己的假设**（都靠一次测量就排除了，值得记）：
+**Two of my own hypotheses refuted along the way** (each ruled out by a single measurement, worth recording):
 
-- **"学生继承了 0-30 的采集窗口，所以连打时遇到窗口外相位就挂"** → 逐相位扫 v10 的 3-3：
-  **121 个相位全部 100%**。不是相位。
-- **"World 3 是被全局 30000 步上限截断"** → 提到 10 万步重跑，6.6 → 6.8 关，几乎没变。不是步数。
-  真相是那些"失败但没记到死亡"的局，是**最后一条命死在那关时没被计数**
-  （`lf < life` 在 life 归零/回绕时不成立）——没有神秘超时，就是死。
+- **"The student inherited the 0-30 collection window, so it fails on out-of-window phases in playthroughs"** → phase-scanning v10 on 3-3:
+  **all 121 phases 100%**. Not phase.
+- **"World 3 is truncated by the global 30000-step cap"** → raised to 100k steps and reran, 6.6 → 6.8 stages, almost no change. Not the step count.
+  The truth is that those runs that "failed without a recorded death" were **cases where the last life was lost on that stage and not counted**
+  (`lf < life` doesn't hold when life hits zero/wraps around) — no mysterious timeout, just death.
 
-⚠️连带撤回一条刚下的结论：我一度以为"把 3-3/3-4 改成采样能把 63% 修到 85%"，
-三次重跑是 63% / 85% / 68%——**n≈60 时那就是噪声**。
+⚠️Also retracting a conclusion I'd just drawn: I briefly thought "switching 3-3/3-4 to sampling can fix 63% to 85%";
+three reruns gave 63% / 85% / 68% — **at n≈60 that's just noise**.
 
-**结论：v7 仍是连打口径最好的模型，v10 是逐关口径最好的模型。** 两者不是同一个东西。
+**Conclusion: v7 is still the best model under the playthrough protocol, v10 the best under the per-stage protocol.** They aren't the same thing.
 
-**工程产物**：`MARIO_HOST_OBS=1` —— obs 留主机内存（pinned）、每 batch 现传。
-共享服务器的卡经常被占满（装不下 28GB 的 obs），而机器内存充足。
-实测 **23s/epoch vs 常驻显存 9.3s，只慢 2.5 倍**（pinned + DMA），不用排队等卡。
+**Engineering artifact**: `MARIO_HOST_OBS=1` — obs stay in host memory (pinned) and are transferred per batch.
+GPUs on the shared server are often fully occupied (can't fit 28GB of obs), while host memory is plentiful.
+Measured **23s/epoch vs 9.3s resident in VRAM, only 2.5× slower** (pinned + DMA), with no queueing for a GPU.
 
-### 逐关能力与连打成绩是解耦的，而我三次都没调对那个旋钮
+### Per-stage ability and playthrough score are decoupled, and three times I didn't turn the right knob
 
-v10 的诊断给出一条统一解释：**老师更干净 → 学生更尖 → 对没见过的入场条件更不耐受**。
-它预测"给采集加噪声、换回覆盖"能救回连打。用 sticky actions（p=0.25）在**同一批 robust 老师**上
-重收 840k 帧（只加状态、不引入第二代老师的标签冲突）来验：
+v10's diagnosis gave a unifying explanation: **cleaner teacher → sharper student → less tolerant of unseen entry conditions**.
+It predicts that "adding noise to collection to buy back coverage" can rescue playthroughs. Tested by re-collecting 840k frames with sticky actions (p=0.25)
+on **the same robust teachers** (adding only states, without introducing label conflicts from a second teacher generation):
 
-| 连打 N=288 | v7 | v10 | v11（全局 sticky） | v12（逐关 sticky） |
+| Playthrough N=288 | v7 | v10 | v11 (global sticky) | v12 (per-stage sticky) |
 |---|---|---|---|---|
-| 逐关取优 | 91.9% | 95.8% | 92.8% | 95% |
-| **十二关全通** | **21.5%** | 10.4% | 16.3% | 5.9% |
-| 2-1 死亡数 | 10 | **254** | 10 | 3 |
+| Per-stage best | 91.9% | 95.8% | 92.8% | 95% |
+| **Twelve-stage full clear** | **21.5%** | 10.4% | 16.3% | 5.9% |
+| 2-1 deaths | 10 | **254** | 10 | 3 |
 | 3-3 / 3-4 | 96/84 | 68/65 | **94/94** | 75/71 |
 | 1-3 | 100 | 100 | 85 | **70** |
 
-**v11 精确修好了预测的位置**——2-1 的死亡从 254 次回到 10 次，3-3 从 68% 到 94%，3-4 从 65% 到 94%。
-所以那条解释有真实的因果成分。但它同时弄坏了 1-3（sticky 下老师只剩 16% 通关率、轨迹基本是垃圾）。
+**v11 precisely fixed the predicted locations** — 2-1 deaths went from 254 back to 10, 3-3 from 68% to 94%, 3-4 from 65% to 94%.
+So that explanation has a real causal component. But it also broke 1-3 (under sticky actions the teacher's clear rate is only 16%, and the trajectories are basically garbage).
 
-于是 v12 只给"单关满分、连打塌"的五关加 sticky，其余保持干净——**结果最差（5.9%）**，
-而且 1-3 明明**没有**加 sticky，却比加了的 v11 更差（70% vs 85%）。⇒ 这些效应不可加、不可定位，
-**我预测的位置一次都没中。**
+So v12 added sticky actions only to the five "perfect single-stage, collapse in playthrough" stages and kept the rest clean — **the worst result (5.9%)**,
+and 1-3, which did **not** get sticky actions, was worse than in v11 where it did (70% vs 85%). ⇒ These effects aren't additive or localizable;
+**not one of my predicted locations hit.**
 
-老实的总结：**逐关能力稳在 92-96%，而连打全通率在 5.9%-21.5% 之间乱跳**（都是 N=288，SE≈2pp，
-不是噪声）。这两件事在这条流水线上是解耦的，而数据配比这个旋钮我没调对。
+Honest summary: **per-stage ability holds steady at 92-96%, while the playthrough full-clear rate jumps around between 5.9% and 21.5%** (all N=288, SE≈2pp,
+not noise). In this pipeline the two are decoupled, and I didn't get the data-mixing knob right.
 
-### 连打落差的候选，已被逐个排除
+### Candidates for the playthrough gap, ruled out one by one
 
-| 候选 | 结论 |
+| Candidate | Verdict |
 |---|---|
-| 相位（学生只见过 0-30 那 31 个） | ✗ 3-3（v10）与 1-3（v10/v11/v12）逐相位扫，**121 个相位 96-100%** |
-| 帧栈（清空 / 预热 / 不动） | ✗ N=288 三条臂打平（21.5 / 19.1 / 18.4） |
-| 全局步数上限 30000 | ✗ 提到 10 万步，6.6 → 6.8 关 |
-| 马里奥形态（大只钻不过一格缝） | ✗ 日志里全程 `small` |
-| 数据覆盖（sticky 配比） | 有因果成分，但**方向不可预测** |
+| Phase (student only saw the 31 phases 0-30) | ✗ Per-phase scans of 3-3 (v10) and 1-3 (v10/v11/v12): **121 phases at 96-100%** |
+| Frame stack (flush / prime / untouched) | ✗ Three arms tie at N=288 (21.5 / 19.1 / 18.4) |
+| Global step cap of 30000 | ✗ Raised to 100k steps, 6.6 → 6.8 stages |
+| Mario's form (big Mario can't fit through a one-tile gap) | ✗ `small` throughout in the logs |
+| Data coverage (sticky mixing) | Has a causal component, but **its direction is unpredictable** |
 
-**只剩 HUD 没在强模型上正经测过。** 单关评测时分数 0 / 命数 2；连打到 1-3 时分数几千、命数在变——
-这些像素就在观测顶部 40 行里。当初"裁掉 HUD 没用"是在 2-2 只有 4% 的模型上量的，
-正是让我在 flush 上判错的那同一种「闸门关着」的情形。
+**Only the HUD hasn't been properly tested on a strong model.** In single-stage evaluation score is 0 / lives 2; by 1-3 in a playthrough the score is in the thousands and lives change —
+these pixels are right there in the top 40 rows of the observation. The earlier "cropping the HUD doesn't help" was measured on a model with only 4% on 2-2,
+exactly the same "gate closed" situation that made me misjudge flush.
 
-### 重测 HUD：这次方向和位置都对上了
+### Re-testing the HUD: this time direction and location both line up
 
-单变量对照——同一批 robust 老师、同样只有 base 数据、同样 60 epoch，
-唯一差别是学生看不看得见顶部 40 行（`collect_distill_crop.py` 的双视角：
-老师看未裁图出标签，存裁过的图给学生，**一个 RL 专家都不用重训**）。
-⚠️那个脚本原版手搭 env 链时**漏了 `NoopReset`**，不补上收出来全是相位 0 的数据——
-正是这个项目最早发现的记忆陷阱本身。两份数据的老师采集期通关率一致（87.3% vs 87.8%），
-所以标签质量相同，变的只有学生看到什么。
+Single-variable control — same robust teachers, same base data only, same 60 epochs,
+the only difference being whether the student can see the top 40 rows (the dual view in `collect_distill_crop.py`:
+the teacher sees the uncropped image to produce labels, the cropped image is stored for the student, **no RL expert needs retraining**).
+⚠️The original version of that script **left out `NoopReset`** when hand-building the env chain; without it, everything collected is phase-0 data —
+precisely the memorization trap this project discovered first. The teachers' clear rates during collection match across the two datasets (87.3% vs 87.8%),
+so label quality is the same; the only thing that changes is what the student sees.
 
-| | 未裁（`mario_v10base`） | **裁 HUD（`mario_v13crop`）** |
+| | Uncropped (`mario_v10base`) | **HUD cropped (`mario_v13crop`)** |
 |---|---|---|
-| 逐关 argmax 均值 | 91% | 89% |
-| 连打平均关数 | 4.0 | **4.5** |
-| **十二关全通（N=288）** | 1.0%（3/288） | **4.2%（12/288）** |
-| 1-3 连打 | 57%（死 462 次） | **68%**（死 318 次） |
-| 3-1 连打 | 50% | **92%** |
-| 3-4 连打 | 33% | **75%** |
+| Per-stage argmax mean | 91% | 89% |
+| Playthrough avg stages | 4.0 | **4.5** |
+| **Twelve-stage full clear (N=288)** | 1.0% (3/288) | **4.2% (12/288)** |
+| 1-3 playthrough | 57% (462 deaths) | **68%** (318 deaths) |
+| 3-1 playthrough | 50% | **92%** |
+| 3-4 playthrough | 33% | **75%** |
 
-**全通率翻四倍（2.4σ），而且涨的正是"单关满分、连打塌"的那几关。**
-这是逐个排除下来第一个方向和位置都对上的候选。代价是逐关略降（91→89）——
-**裁掉 HUD 确实丢了一点信息，换来的是跨关的一致性。**
+**Full-clear rate quadruples (2.4σ), and the gains are exactly on the "perfect single-stage, collapse in playthrough" stages.**
+This is the first candidate, after ruling them out one by one, where both direction and location line up. The cost is a slight per-stage drop (91→89) —
+**cropping the HUD does lose a bit of information, and buys cross-stage consistency in return.**
 
-但 4.2% 离 v7 的 21.5% 还很远，而这是 base-only 对 base-only 的比较
-（DAgger 单独就能把 base-only 的 1.0% 抬到 10.4%）。
-**下一步该比的是「裁 HUD + DAgger」对 v10 的 10.4%**，才知道 HUD 在完整配方里值多少。
+But 4.2% is still far from v7's 21.5%, and this is a base-only vs base-only comparison
+(DAgger alone lifts base-only's 1.0% to 10.4%).
+**The next comparison should be "HUD crop + DAgger" against v10's 10.4%** to know what the HUD is worth in the full recipe.
 
-**跑了，又反了，而且符号相反**（`collect_dagger_crop.py`：学生看裁过的图开车、老师看未裁图打标签）：
+**Ran it, and it flipped again, with the opposite sign** (`collect_dagger_crop.py`: the student drives seeing cropped frames, the teacher labels seeing uncropped frames):
 
-| 连打全通 N=288 | 未裁 | 裁 HUD |
+| Playthrough full clear N=288 | Uncropped | HUD cropped |
 |---|---|---|
-| 只有 base 数据 | 1.0% | **4.2%** ✔ |
+| Base data only | 1.0% | **4.2%** ✔ |
 | base + DAgger | **10.4%** | 5.9% ✗ |
 
-同一个改动，在两种配方下方向相反（2.0σ）。
+The same change goes in opposite directions under two recipes (2.0σ).
 
-### 收口：逐关能力可靠可涨，组合成绩不可控
+### Wrap-up: per-stage ability is reliable and improvable; combined score is not controllable
 
-七个学生摊开看：
+Seven students laid out:
 
-| 模型 | 逐关 argmax | 连打全通（N=288） |
+| Model | Per-stage argmax | Playthrough full clear (N=288) |
 |---|---|---|
-| **v7**（老一代老师 + 两轮 DAgger + 定点 DAgger） | 77% | **21.5%** |
-| v10（robust 班底 + DAgger） | 95% | 10.4% |
-| v11（v10 + 全局 sticky） | 92% | 16.3% |
-| v12（v10 + 逐关 sticky） | 95% | 5.9% |
-| v10base（robust，仅 base） | 91% | 1.0% |
-| v13crop（裁 HUD，仅 base） | 89% | 4.2% |
-| v14crop（裁 HUD + DAgger） | 94% | 5.9% |
+| **v7** (older-generation teachers + two DAgger rounds + targeted DAgger) | 77% | **21.5%** |
+| v10 (robust roster + DAgger) | 95% | 10.4% |
+| v11 (v10 + global sticky) | 92% | 16.3% |
+| v12 (v10 + per-stage sticky) | 95% | 5.9% |
+| v10base (robust, base only) | 91% | 1.0% |
+| v13crop (HUD cropped, base only) | 89% | 4.2% |
+| v14crop (HUD cropped + DAgger) | 94% | 5.9% |
 
-**逐关能力稳在 89-95%，连打全通率在 1.0%-21.5% 之间乱跳，v7 至今没被超过。**
-每一个改动（覆盖 / sticky 配比 / 裁 HUD）都在某些配方里帮忙、在另一些里有害，
-**配方之间的方差（20pp）远大于逐关能力的方差（6pp）。**
+**Per-stage ability holds at 89-95%, playthrough full-clear rate jumps around between 1.0% and 21.5%, and v7 has still not been beaten.**
+Every change (coverage / sticky mixing / HUD crop) helps in some recipes and hurts in others;
+**variance between recipes (20pp) is far larger than variance in per-stage ability (6pp).**
 
-⇒ **这条流水线上，「每关都更强」和「连着打更远」是两件事，而且后者我没能控制。**
-继续试配方是错的方法：最近六次预测中了一次，其余都被数据推翻，
-而每次的解释都能自圆其说——那正是没有机制、只在拟合噪声的样子。
+⇒ **In this pipeline, "stronger on every stage" and "goes further in a row" are two different things, and I couldn't control the latter.**
+Trying more recipes is the wrong method: of the last six predictions one hit and the rest were overturned by data,
+and every explanation was self-consistent — exactly what it looks like when there's no mechanism and you're just fitting noise.
 
-**该做的是把猜测换成测量**：把连打进 1-3 那一帧的观测、和单关 reset 后的观测 dump 出来逐像素 diff。
-差在哪就是差在哪。
+**What to do is replace guessing with measurement**: dump the observation on the frame of entering 1-3 in a playthrough and the observation after a single-stage reset, and diff them pixel by pixel.
+Wherever they differ is where the difference is.
 
-### 测了，入场观测本来就一样——三个假设一次性出局
+### Measured: the entry observations were the same all along — three hypotheses out at once
 
-`diag_entry_diff.py`（同一模型、同一关，「从 1-1 打过来」vs「单关 reset」，各采 10 次）：
+`diag_entry_diff.py` (same model, same stage, "played through from 1-1" vs "single-stage reset", 10 samples each):
 
 ```
-只比最新一帧：  HUD 带 0.59   游戏区 0.13   全图 0.20   ← 几乎逐像素相同
-四帧平均：      HUD 带 0.72   游戏区 11.77  全图 9.93   ← 差异全来自栈里的旧帧
-info：score 连打 35100-39200 / 单关 0；x_pos 都是 40；status 都是 small
+latest frame only:  HUD band 0.59   play area 0.13   full image 0.20   ← nearly identical pixel by pixel
+four-frame average: HUD band 0.72   play area 11.77  full image 9.93   ← difference comes entirely from older frames in the stack
+info: score playthrough 35100-39200 / single-stage 0; x_pos both 40; status both small
 ```
 
-一次性得到三个结论：
+Three conclusions at once:
 
-- **HUD 不是原因。** 分数确实差了三万多，但缩到 84×84 灰度后只值 **0.59/255**。
-  ⇒ **裁 HUD 之所以有效（1.0%→4.2%），不是因为去掉了分数，而是因为裁掉顶部 40 行后
-  游戏区在同样 84×84 里分辨率变高了**——那个实验有我没控制住的混淆变量。
-- **入场画面不是原因。** 游戏区差 0.13/255，本来就一样。
-- **差异全在栈里的旧帧**（四帧平均 11.77 vs 最新帧 0.13）。
+- **The HUD is not the cause.** The score really does differ by over thirty thousand, but shrunk to 84×84 grayscale it's worth only **0.59/255**.
+  ⇒ **Cropping the HUD worked (1.0%→4.2%) not because it removed the score, but because cropping the top 40 rows
+  raises the resolution of the play area within the same 84×84** — that experiment had a confounding variable I didn't control.
+- **The entry frame is not the cause.** The play area differs by 0.13/255 — it was the same all along.
+- **The difference is entirely in the older frames in the stack** (four-frame average 11.77 vs latest frame 0.13).
 
-**相位也扫死了**：v10 在 1-3 和 3-3 上扫到 **360 帧、每个相位都 100%**。
+**Phase was also scanned to death**: v10 on 1-3 and 3-3, scanned up to **360 frames, every phase 100%**.
 
-**"三条命"这个口径差也查了**：单关评测的 `while not done` 里 done 是 game over，
-等于允许最多三次尝试。加 `MARIO_ONE_LIFE=1` 重测——**只差 2pp**
-（v10 95→93、v12 95→95、v7 77→75）。原因：argmax + 确定性模拟器下，
-死后重试逐帧复现同一条轨迹、同样地死，多几条命等于没有。
+**The "three lives" protocol difference was checked too**: in single-stage evaluation, done in `while not done` is game over,
+which effectively allows up to three attempts. Re-testing with `MARIO_ONE_LIFE=1` — **only 2pp apart**
+(v10 95→93, v12 95→95, v7 77→75). Reason: with argmax + a deterministic emulator,
+a retry after death reproduces the same trajectory frame by frame and dies the same way; extra lives are as good as none.
 
-⇒ 最后回到帧栈。之前判"三种做法打平"是在 **v7** 上测的（它 3-3 本来就 96%），**v10 从没测过**。
-在更尖的 v10 上重测（N=288）：**3-3 从 68% → 93%、2-1 94% → 100%**，
-但 3-4 从 65% 掉到 53%，全通率 10.4% → 11.8%（0.5σ）。**又是局部大动、全局抵消。**
+⇒ Finally back to the frame stack. The earlier verdict "the three approaches tie" was measured on **v7** (already 96% on 3-3); **v10 had never been tested**.
+Re-testing on the sharper v10 (N=288): **3-3 from 68% → 93%, 2-1 94% → 100%**,
+but 3-4 fell from 65% to 53%, full-clear rate 10.4% → 11.8% (0.5σ). **Again big local moves, cancelling out globally.**
 
-### 真正的一阶项：全通率基本由 2-2 一关决定
+### The real first-order term: the full-clear rate is essentially decided by 2-2 alone
 
-| 模型 | 2-2 连打条件成功率 | 十二关全通 |
+| Model | 2-2 playthrough conditional success | Twelve-stage full clear |
 |---|---|---|
 | **v7** | **54%** | **21.5%** |
 | v11 | 47% | 16.3% |
@@ -969,145 +971,145 @@ info：score 连打 35100-39200 / 单关 0；x_pos 都是 40；status 都是 sma
 | v12 | 43% | 5.9% |
 | v14crop | 39% | 5.9% |
 
-**几乎单调。** 全通率的一阶项就是 2-2，其余都是二阶。而我试过的所有改动
-（老师代际 / 覆盖 / sticky 配比 / 裁 HUD / 帧栈处理）**没有一个把 2-2 的连打成功率推过 54%**。
-⇒ 那些"组合落差"的追查，很大程度上是在二阶项里打转，一阶项从头到尾没动过。
+**Almost monotonic.** The first-order term of the full-clear rate is 2-2; everything else is second-order. And every change I tried
+(teacher generation / coverage / sticky mixing / HUD crop / frame-stack handling) **failed to push 2-2's playthrough success past 54%**.
+⇒ The chase after those "combination gaps" was largely going round in circles among second-order terms; the first-order term never moved from start to finish.
 
-### 试过没用的
+### Tried and didn't help
 
-- **裁掉 HUD**：状态栏（分数/命数/时间）确实进了观测，"打到第 5 关时的 1-2"和"单独打 1-2"
-  在像素上是两张不同的图。裁掉顶部 40 行重收 840k 帧重蒸 → 逐关 71%（vs 72.9%）、
-  连打 2.1 关（vs 2.3）。**机制真实，但不是主因。**
-- **skip=2**：猜"一格宽的缝被 4 帧动作粒度卡死"。8M 步重训 → 13%，没有改善。
-- **ent_coef 0.05**：想用更高的熵把策略从"背下来的解"里踹出来。全程低于 0.02（14% vs 17%）。
-- **Backplay / 从存档点开局**（Go-Explore 那套）：用 `nes_py` 的 `_backup/_restore` 把 agent 直接放到
-  鱼缝前反复练。机制跑通了（开局 x≈1880），采样侧打平（25% vs 24%）、无抖动还更好（42% vs 32%），
-  **但把 argmax 模式打没了**（100%→0%）；而且从硬点开局的回合占比越高整关能力被侵蚀得越厉害
-  （P=0.75 全面低于 P=0.5）。三个实现坑：`MarioBase` 是 `gym.Env` 不是 `Wrapper`（底层环境在 `_e` 上，
-  只顺 `.env` 钻找不到）；前缀录在 skip=4 环境里、在 `MarioBase` 层重放要重复 4 次（否则只走 1/4 距离）；
-  **`_restore()` 不清 `done` 标志**——`reset()` 才是 `_restore()` + `done=False`，绕过 reset 直接 restore
-  会撞 `cannot step in a done environment`，而这个异常在 SubprocVecEnv 里表现为父进程的 `EOFError`，
-  看不到真因。正解反而更简单：`nes_py` 的 `reset()` 本身就是"有备份就恢复"，所以重放前缀后 `_backup()`
-  一次，之后正常 reset 就会落到快照上。
-- **2-2 专项蒸馏**（让老师用最强的 argmax 模式开车收数据）：**反而更差**（11%→0%）。
-  模仿学习要的是**状态覆盖**，不是最优示范——argmax 轨迹是一条窄管道，学生一偏出去就不会走了；
-  采样轨迹虽然一半是失败的，但覆盖了管道周围。这正是 DAgger 存在的理由，我把它反过来用了。
-- **课程 v2**（带正确的 VecNormalize + 最难档多训两程，合计 12M）：只有 16%/2%，没能复现 v1 的 35%。
-  加上三个种子也全没复现（7/12/15%）。当时判成"靠运气不靠配方，命中率约 1/5"，
-  **后来证明是熵奖励在持续溶解尖解**（见上一节）——关掉之后 88% 是配方产出的，不用抽奖。
-- **换问题表述（更长时间窗 / LSTM）**：想验"记忆能不能救 2-2"，结果三条臂全部失败在**前置条件**上——
-  **从零训 2-2 在 12M 步内只能到 3-4%**（平均最远 x≈1700，旗杆在 3161），而历史那条 warm-start 链条
-  （塑形 → 单 checkpoint → 梯子，每级续训）能到 66-78%。所以叠 4 帧 vs 叠 8 帧的对比是在地板上做的，
-  对"叠帧数"没有说明力。**反过来它确认了一件事：当年那条又土又长的链条不是绕弯路，
-  它把一个不可行的探索问题拆成了几步可行的。**
-  - LSTM 那条主动砍了：叠 4 帧已经把"鱼在哪、往哪游、多快"编码进观测，这任务近 Markov，
-    记忆没有可赚的信息；代价却实打实——BPTT 沿时间串行（fps 1328 vs 前馈 1934），
-    `n_steps` 兼作 BPTT 长度（照抄前馈的 512 会让一次更新变成 960 次序列展开，直接卡死），
-    而且换架构**不能 warm-start**，必须从零重学最贵的那段。
-- **蒸馏可以当跨架构的桥，但"先蒸后 RL"会立刻炸**：一份轨迹里同时存 4 帧和 8 帧观测
-  （老师看它自己的 4 帧出动作概率），几分钟就能把通关技能灌进任意叠帧数的学生——
-  实测 noop=0 拿到 52%（4 帧）/ 62%（8 帧），桥是通的。**但接着做 RL 微调，第一级 1M 步就把 52% 打成 1%。**
-  当时归因到"蒸馏只训了策略头，**价值头是随机的**"。**后来证明这条归因是错的**，见下一条。
-- **补了价值头照样炸——真因是"蒸馏策略不是这个 RL 目标的不动点"**。写了 `warmup_value_head.py`：
-  先用学生自己的轨迹把蒙特卡洛回报回归进 `value_net`，**冻住共享 CNN 主干**（sb3 `CnnPolicy` 的
-  pi/vf 共用 features_extractor，不冻的话补 V 的梯度会顺着主干爬回去改策略），
-  实测策略漂移逐字 `0.00e+00`，V 也确实补上了（return 方差 1.43 → MSE 0.74，EV≈0.48）。
-  **然后微调 25 万步，51% → 0%，DET 和 STO 一起归零。** 存取往返也排除了（补完 V 的模型单测 51%，
-  比原版还高一点）。⇒ 真因是结构性的：PPO 会拖着策略走向塑形奖励的最优点，而蒸馏策略站在别处，
-  这条路要穿过一大片很差的区域。`lr=1e-5` 只是让它走得慢——64 环境 × `n_steps` 64 × 10 epoch，
-  25 万步已经是近万次 Adam 更新。
-- **KL 锚挡住了崩塌，但没带来增益**。`train_kl_anchor.py`，实现上有个取巧的地方值得记：
-  没有重写 `PPO.train`（照抄一大段实现跨版本易碎），而是把 `evaluate_actions` 返回的 `entropy`
-  换成 `-KL(π_ref‖π)`——sb3 那行 `loss += ent_coef·(-mean(entropy))` 就正好变成 `+β·mean(KL)`。
-  于是 `ent_coef` 在那个脚本里是 β，日志里的 `entropy_loss` 是 mean(KL)；
-  ⚠️存档前必须 `del model.policy.evaluate_actions`，否则闭包（引用了 ref）pickle 不了。
-  结果：β=0.5 / 5 都不再归零（同位置无锚 0%、有锚 23-28%，并回爬到 41-47%），
-  **但都没超过起点的 47-48%**。归因坐实了，可是对合并学生的 2-2 没用——
-  因为它缺的不是回报，是**偏离轨道后回不来**，那是 DAgger 的活（实测 +21pp）。
-- **一个操作事故值得记**：往 GPU 机器传项目时 tar 只带了 `*.zip`/`*.py`/数据，**`*.pkl`（VecNormalize
-  的奖励归一化统计）一个没传**，导致所有 warm-start 续训都在"统计从零重估"下跑。2-2 侥幸没事
-  （奖励被梯子 bonus 主导、重估得快），World 1 直接崩：1-2 从 55% 掉到 1%——策略是在旧奖励尺度下
-  训出来的，前几次更新的 advantage 尺度把它打散了，跟这个项目最早 run1 崩掉的机制一模一样。
-  **warm-start 续训前先确认 VecNormalize 在不在**，启动日志里那句"新建统计"不是无害提示。
+- **Cropping the HUD**: the status bar (score/lives/time) does enter the observation; "1-2 when you've played up to stage 5" and "1-2 played alone"
+  are two different images in pixels. Cropping the top 40 rows, re-collecting 840k frames and re-distilling → per-stage 71% (vs 72.9%),
+  playthrough 2.1 stages (vs 2.3). **The mechanism is real, but it's not the main cause.**
+- **skip=2**: guessed that "the one-tile gap is blocked by the 4-frame action granularity". 8M steps of retraining → 13%, no improvement.
+- **ent_coef 0.05**: hoped higher entropy would kick the policy out of the "memorized solution". Below 0.02 throughout (14% vs 17%).
+- **Backplay / starting from savestates** (the Go-Explore approach): use `nes_py`'s `_backup/_restore` to put the agent right in front of
+  the fish gap and practice repeatedly. The mechanism worked (start at x≈1880); the sampling side tied (25% vs 24%) and was even better without jitter (42% vs 32%),
+  **but it wiped out argmax mode** (100%→0%); and the higher the share of episodes starting at the hard point, the more whole-stage ability eroded
+  (P=0.75 below P=0.5 across the board). Three implementation pitfalls: `MarioBase` is a `gym.Env`, not a `Wrapper` (the underlying env is on `_e`,
+  so drilling down only via `.env` doesn't find it); the prefix is recorded in the skip=4 environment, so replaying at the `MarioBase` layer must repeat each action 4 times (otherwise it only covers 1/4 the distance);
+  **`_restore()` doesn't clear the `done` flag** — `reset()` is what does `_restore()` + `done=False`; restoring directly while bypassing reset
+  hits `cannot step in a done environment`, and in SubprocVecEnv that exception surfaces as an `EOFError` in the parent process,
+  hiding the real cause. The correct fix is actually simpler: `nes_py`'s `reset()` itself is "restore if there's a backup", so call `_backup()`
+  once after replaying the prefix, and subsequent normal resets land on the snapshot.
+- **2-2 targeted distillation** (having the teacher drive in its strongest argmax mode to collect data): **actually worse** (11%→0%).
+  Imitation learning needs **state coverage**, not optimal demonstrations — an argmax trajectory is a narrow pipe, and once the student strays it doesn't know how to proceed;
+  sampled trajectories, though half are failures, cover the area around the pipe. This is exactly why DAgger exists, and I used it backwards.
+- **Curriculum v2** (with correct VecNormalize + two extra rounds on the hardest level, 12M total): only 16%/2%, failed to reproduce v1's 35%.
+  Three more seeds didn't reproduce it either (7/12/15%). At the time I judged it "luck rather than recipe, hit rate about 1/5";
+  **it later turned out the entropy bonus was continuously dissolving the sharp solution** (see the section above) — with it off, 88% is a recipe product, no lottery needed.
+- **Reformulating the problem (longer time window / LSTM)**: wanted to test "can memory rescue 2-2"; all three arms failed on the **precondition** —
+  **training 2-2 from scratch reaches only 3-4% within 12M steps** (average farthest x≈1700, flagpole at 3161), while the historical warm-start chain
+  (shaping → single checkpoint → ladder, continuing training at each level) reaches 66-78%. So the 4-frame vs 8-frame stacking comparison was done on the floor
+  and says nothing about "number of stacked frames". **Conversely it confirmed one thing: that clunky, long chain back then wasn't a detour;
+  it broke an infeasible exploration problem into several feasible steps.**
+  - The LSTM arm was cut deliberately: stacking 4 frames already encodes "where the fish are, which way and how fast they swim" into the observation; the task is nearly Markov,
+    so memory has no information to gain; the cost, however, is very real — BPTT is serial in time (fps 1328 vs 1934 feed-forward),
+    `n_steps` doubles as the BPTT length (copying the feed-forward 512 turns one update into 960 sequence unrolls and just hangs),
+    and switching architectures **can't warm-start**; the most expensive stretch must be relearned from scratch.
+- **Distillation can bridge architectures, but "distill then RL" blows up immediately**: storing both 4-frame and 8-frame observations in one trajectory
+  (the teacher looks at its own 4 frames to produce action probabilities) pours the clearing skill into a student with any stack depth within minutes —
+  measured 52% (4 frames) / 62% (8 frames) at noop=0, so the bridge works. **But RL fine-tuning right after knocks 52% down to 1% within the first 1M-step level.**
+  At the time I attributed it to "distillation only trained the policy head; **the value head is random**". **That attribution later proved wrong**; see the next item.
+- **It still blows up with the value head filled in — the real cause is "the distilled policy is not a fixed point of this RL objective"**. Wrote `warmup_value_head.py`:
+  first regress Monte Carlo returns from the student's own trajectories into `value_net`, **freezing the shared CNN backbone** (sb3 `CnnPolicy`'s
+  pi/vf share the features_extractor; unfrozen, the gradient for V would climb back through the backbone and change the policy);
+  measured policy drift is literally `0.00e+00`, and V was indeed filled in (return variance 1.43 → MSE 0.74, EV≈0.48).
+  **Then fine-tuning 250k steps: 51% → 0%, DET and STO both to zero.** A save/load round trip was ruled out too (the model with V filled in tests at 51% single-stage,
+  slightly higher than the original). ⇒ The real cause is structural: PPO drags the policy toward the optimum of the shaped reward, while the distilled policy stands elsewhere,
+  and the path between crosses a large region of poor performance. `lr=1e-5` only makes it walk slower — 64 envs × `n_steps` 64 × 10 epochs,
+  250k steps is already nearly ten thousand Adam updates.
+- **A KL anchor stopped the collapse but brought no gain**. `train_kl_anchor.py`; one shortcut in the implementation is worth noting:
+  instead of rewriting `PPO.train` (copying a big chunk of implementation is fragile across versions), replace the `entropy` returned by `evaluate_actions`
+  with `-KL(π_ref‖π)` — sb3's line `loss += ent_coef·(-mean(entropy))` then becomes exactly `+β·mean(KL)`.
+  So in that script `ent_coef` is β, and `entropy_loss` in the logs is mean(KL);
+  ⚠️before saving you must `del model.policy.evaluate_actions`, otherwise the closure (which references ref) can't be pickled.
+  Result: with β=0.5 / 5 it no longer goes to zero (at the same point 0% without anchor, 23-28% with, climbing back to 41-47%),
+  **but neither exceeds the starting 47-48%**. The attribution is confirmed, but it's no use for the merged student's 2-2 —
+  because what it lacks isn't return, it's **being unable to get back after leaving the track**, which is DAgger's job (measured +21pp).
+- **An operational accident worth recording**: when transferring the project to the GPU machine, the tar included only `*.zip`/`*.py`/data, and **not a single `*.pkl` (VecNormalize's
+  reward-normalization statistics)**, so every warm-start continuation ran with "statistics re-estimated from zero". 2-2 got lucky
+  (reward dominated by the ladder bonus, re-estimated quickly); World 1 collapsed outright: 1-2 fell from 55% to 1% — the policy was trained under the old reward scale,
+  and the advantage scale of the first few updates scattered it, exactly the same mechanism as this project's earliest run1 collapse.
+  **Before warm-start continuation, confirm VecNormalize is present**; the "creating new statistics" line in the startup log is not a harmless notice.
 
-### 环境开关
+### Environment switches
 
-这些都是环境变量，训练和评测脚本不用改代码（**训练和评测必须用同一组**，否则数字不可比）：
+These are all environment variables; training and evaluation scripts need no code changes (**training and evaluation must use the same set**, otherwise numbers aren't comparable):
 
-| 变量 | 作用 |
+| Variable | Effect |
 |---|---|
-| `MARIO_NOOP=k` | 开局随机空按 0~k 个模拟器帧（相位抖动）。不设＝旧行为，旧数字可复现 |
-| `MARIO_SKIP=k` | 一个动作连按几帧（默认 4） |
-| `MARIO_CROP=1` | 裁掉顶部 40 行状态栏 |
-| `MARIO_FLUSH=1` | 过关瞬间清空叠帧缓冲。⚠️实测无收益（N=288 三条臂打平），留着只为复现旧数字 |
-| `MARIO_PRIME=1` | 过关瞬间多走 n-1 步把栈填满真实连续帧。机制上更干净，实测同样无收益 |
-| `MARIO_DET=1` | 评测用 argmax。⚠️有效样本量是**相位数**不是局数（每相位非 0 即 100），脚本已按此逐相位跑 |
-| `MARIO_NOOP_EXACT=1` | 空按**恰好** `MARIO_NOOP` 帧而不是 0~k 随机，用来逐相位扫描 |
-| `MARIO_STICKY=1` | sticky actions（Machado 2018，p=0.25，实测生效 25.4%） |
-| `MARIO_DET_STAGES=…` | `run_fullgame.py auto` 的逐关模式表。⚠️**跟着模型走，换模型必须按新模型的逐关实测重填** |
-| `MARIO_ENT` / `MARIO_LR` / `MARIO_SAVE_FREQ` | 熵系数 / 学习率 / 存档间隔。三件套：`ENT=0 LR=1e-5 SAVE_FREQ=25000` |
-| `MARIO_ONLY=1-2,2-2` | 收蒸馏数据时只重收指定几关（换了某关老师不必把 84 万帧全收一遍） |
-| `MARIO_BETA` | `train_kl_anchor.py` 的 KL 系数 β（它复用 `ent_coef` 这个位置，见上文） |
+| `MARIO_NOOP=k` | Random no-op for 0~k emulator frames at the start (phase jitter). Unset = old behavior, old numbers reproducible |
+| `MARIO_SKIP=k` | How many frames each action is held (default 4) |
+| `MARIO_CROP=1` | Crop the top 40 rows (status bar) |
+| `MARIO_FLUSH=1` | Flush the frame-stack buffer at the moment of a stage clear. ⚠️Measured no gain (three arms tie at N=288); kept only to reproduce old numbers |
+| `MARIO_PRIME=1` | At the moment of a stage clear, take n-1 extra steps to fill the stack with real consecutive frames. Mechanistically cleaner, measured likewise no gain |
+| `MARIO_DET=1` | Evaluate with argmax. ⚠️Effective sample size is the **number of phases**, not runs (each phase is either 0 or 100); the scripts already run per phase accordingly |
+| `MARIO_NOOP_EXACT=1` | No-op for **exactly** `MARIO_NOOP` frames instead of random 0~k, for per-phase scanning |
+| `MARIO_STICKY=1` | sticky actions (Machado 2018, p=0.25, measured effective 25.4%) |
+| `MARIO_DET_STAGES=…` | Per-stage mode table for `run_fullgame.py auto`. ⚠️**Belongs to the model; when switching models it must be refilled from the new model's per-stage measurements** |
+| `MARIO_ENT` / `MARIO_LR` / `MARIO_SAVE_FREQ` | Entropy coefficient / learning rate / checkpoint interval. The three-piece set: `ENT=0 LR=1e-5 SAVE_FREQ=25000` |
+| `MARIO_ONLY=1-2,2-2` | When collecting distillation data, re-collect only the specified stages (after swapping one stage's teacher there's no need to re-collect all 840k frames) |
+| `MARIO_BETA` | KL coefficient β for `train_kl_anchor.py` (it reuses the `ent_coef` slot; see above) |
 
-## 环境搭建
+## Setup
 
-需要 **Python 3.10**（老的马里奥库不支持 3.12+）。
+Requires **Python 3.10** (the old Mario libraries don't support 3.12+).
 
 ```bash
 python3.10 -m venv venv
 source venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-# 若 numpy 被升级回 2.x：
+# If numpy got upgraded back to 2.x:
 pip install 'numpy<2'
 ```
 
-## 怎么跑
+## How to run
 
 ```bash
-# 单关专家 / 混训
-python train_world1.py 3000000          # World 1 四关混训
-python train_2_2_ladder.py 3000000      # 2-2 梯子塑形（续训自塑形专家）
+# Single-stage experts / mixed training
+python train_world1.py 3000000          # World 1 four-stage mixed training
+python train_2_2_ladder.py 3000000      # 2-2 ladder shaping (continues from the shaped expert)
 
-# 蒸馏流水线
-python collect_distill_w2.py            # 收老师数据
-python distill_w2_wide.py 35 cpu        # 蒸 WideCNN 学生
-python collect_dagger_w2.py             # DAgger 收漂移数据 → 重蒸
+# Distillation pipeline
+python collect_distill_w2.py            # Collect teacher data
+python distill_w2_wide.py 35 cpu        # Distill the WideCNN student
+python collect_dagger_w2.py             # DAgger: collect drift data → re-distill
 
-# 十二关大合并（GPU 机器上跑：整份 obs 进显存，需要 ~25GB 显存）
+# Twelve-stage merge (run on the GPU machine: whole obs array in VRAM, needs ~25GB VRAM)
 python distill_all12_gpu.py 60 mario_all12_wide 512
-MARIO_DOUBLE_NORM=1 python distill_all12_gpu.py 60 mario_all12_dblnorm 512   # 双重归一化消融
+MARIO_DOUBLE_NORM=1 python distill_all12_gpu.py 60 mario_all12_dblnorm 512   # Double-normalization ablation
 
-# 带 no-op starts 的训练 / 评测（诚实口径）
-MARIO_NOOP=30 python train_world_noop.py w1 5000000 48        # 按世界混训，带相位抖动
-bash run_curriculum22.sh                                       # 2-2 课程式加压 0-4→8→16→30
-python eval_noop_audit.py teachers 100                         # 老师体检：抖 vs 不抖
-MARIO_DET=1 python eval_noop_audit.py "models22:a.zip,b.zip" 400   # 指定模型在 2-2 上测 argmax
-python eval_phase_jitter.py mario_all12_wide.zip 50 60         # 十二关相位抖动评测
-python run_fullgame.py mario_all12_wide.zip hybrid 32          # 完整游戏连打，能连过几关
+# Training / evaluation with no-op starts (honest protocol)
+MARIO_NOOP=30 python train_world_noop.py w1 5000000 48        # Per-world mixed training with phase jitter
+bash run_curriculum22.sh                                       # 2-2 curriculum escalation 0-4→8→16→30
+python eval_noop_audit.py teachers 100                         # Teacher checkup: jitter vs no jitter
+MARIO_DET=1 python eval_noop_audit.py "models22:a.zip,b.zip" 400   # argmax test of given models on 2-2
+python eval_phase_jitter.py mario_all12_wide.zip 50 60         # Twelve-stage phase-jitter evaluation
+python run_fullgame.py mario_all12_wide.zip hybrid 32          # Full-game playthrough: how many stages in a row
 
-# 评测 / 录像
-python eval_stages.py                    # 逐关通关率（World 1）
-python eval_all12.py mario_all12_wide.zip 30 48      # 十二关逐关，多进程并行
-python record_world2_montage.py mario_w2_wide.zip    # 录通关 GIF
-python record_all12_montage.py mario_all12_wide.zip mario_all12.gif   # 十二关 montage（12 关并行录）
+# Evaluation / recording
+python eval_stages.py                    # Per-stage clear rate (World 1)
+python eval_all12.py mario_all12_wide.zip 30 48      # Twelve stages per stage, multiprocess parallel
+python record_world2_montage.py mario_w2_wide.zip    # Record clear GIF
+python record_all12_montage.py mario_all12_wide.zip mario_all12.gif   # Twelve-stage montage (12 stages recorded in parallel)
 ```
 
-> 表里两行都是这次用同一套评测（每关 100 局）重测的：八关合并 63%（当年记的 52% 是每关 20 局的结果）。
-> 通关率在 N=20/30 这个量级单关能抖 ±8pp，跨实验比数字前先对齐样本量。
+> Both rows in the table were re-measured this time with the same evaluation (100 runs per stage): eight-stage merge 63% (the 52% recorded back then was from 20 runs per stage).
+> At N=20/30, a single stage's clear rate can swing ±8pp; align sample sizes before comparing numbers across experiments.
 
-## 文件导览
+## File guide
 
-| 类别 | 文件 |
+| Category | Files |
 |---|---|
-| 环境 | `make_env.py`（gym→gymnasium 翻译 / 跳帧 / 灰度缩放 / 叠帧；各关 / 塑形奖励工厂函数） |
-| 网络 | `wide_cnn.py`（加宽 NatureCNN）、`impala_cnn.py`（残差版，RL 里训不动的反面教材） |
-| 专家训练 | `train_world{1,2,3}*.py`、`train_{1_3,2_1,2_2,3_1}_expert*.py`、`train_2_2_ladder.py`（梯子塑形） |
-| 蒸馏 | `collect_distill_*.py`、`distill_*_student.py`、`distill_*_wide.py`、`collect_dagger_*.py` |
-| 合并 | `distill_all8_wide.py`（八关）、`distill_all12_gpu.py`（十二关，obs 全进显存）、`distill_all12_{wide,mmap}.py`（十二关的抽样版 / 磁盘 memmap 版，Mac 上的两次挣扎） |
-| 评测/录像 | `eval_stages.py`、`eval_all12.py`（十二关并行）、`eval_lstm22.py`、`record_*_montage.py`、`record_gif.py`、`plot_progress.py` |
-| 相位抖动 | `train_world_noop.py`（按世界混训带抖动）、`train_2_2_noop.py`（2-2 重训，支持课程/熵/设备开关）、`run_curriculum22*.sh`、`run_seed22.sh`（多种子）、`collect_distill_noop.py`（抖动下重收数据） |
-| 诚实评测 | `eval_noop_audit.py`（老师体检 / 学生重测 / 降级曲线 / 指定模型，支持 `MARIO_DET`）、`eval_phase_jitter.py`、`run_fullgame.py`（完整游戏连打，det/sto/hybrid 三种打法） |
-| 杂项 | `stub_env.py`（空壳 env：蒸馏只需要 obs/action 的形状，用它就不必装 NES 模拟器）、`collect_distill_crop.py`（裁 HUD 版，负结果留档） |
+| Environment | `make_env.py` (gym→gymnasium translation / frame skip / grayscale resize / frame stack; per-stage / shaped-reward factory functions) |
+| Networks | `wide_cnn.py` (widened NatureCNN), `impala_cnn.py` (residual version, a cautionary example that wouldn't train in RL) |
+| Expert training | `train_world{1,2,3}*.py`, `train_{1_3,2_1,2_2,3_1}_expert*.py`, `train_2_2_ladder.py` (ladder shaping) |
+| Distillation | `collect_distill_*.py`, `distill_*_student.py`, `distill_*_wide.py`, `collect_dagger_*.py` |
+| Merge | `distill_all8_wide.py` (eight stages), `distill_all12_gpu.py` (twelve stages, obs all in VRAM), `distill_all12_{wide,mmap}.py` (twelve-stage subsampled / disk memmap versions, two struggles on the Mac) |
+| Evaluation/recording | `eval_stages.py`, `eval_all12.py` (twelve stages in parallel), `eval_lstm22.py`, `record_*_montage.py`, `record_gif.py`, `plot_progress.py` |
+| Phase jitter | `train_world_noop.py` (per-world mixed training with jitter), `train_2_2_noop.py` (2-2 retraining, supports curriculum/entropy/device switches), `run_curriculum22*.sh`, `run_seed22.sh` (multiple seeds), `collect_distill_noop.py` (re-collect data under jitter) |
+| Honest evaluation | `eval_noop_audit.py` (teacher checkup / student re-test / degradation curve / given models, supports `MARIO_DET`), `eval_phase_jitter.py`, `run_fullgame.py` (full-game playthrough, three modes det/sto/hybrid) |
+| Misc | `stub_env.py` (stub env: distillation only needs obs/action shapes, so with it you don't need the NES emulator installed), `collect_distill_crop.py` (HUD-crop version, kept as a negative result) |
 
-> 训练产物（模型 `.zip`、检查点、蒸馏数据 `.npz`）体积太大没进仓，按上面的脚本可自行复现。
+> Training artifacts (model `.zip`s, checkpoints, distillation data `.npz`) are too large to be in the repo; they can be reproduced with the scripts above.
