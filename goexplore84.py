@@ -15,6 +15,8 @@ import numpy as np
 # 手柄字节：right 0x80 left 0x40 down 0x20 up 0x10 B 0x02 A 0x01
 MACROS = [0x80, 0x82, 0x81, 0x83, 0x40, 0x42, 0x41, 0x43, 0x01, 0x00, 0x20]
 HOOK = os.environ.get("MARIO_GE_ROOM2") == "1"
+# MARIO_GE_GOAL_X=4816 → 成功判据改成"走到这个 x"（最后一段：库巴桥尽头的斧头），不再看传送 / 换区域
+GOAL_X = int(os.environ.get("MARIO_GE_GOAL_X", "0"))
 DBG = [0, 0]
 
 
@@ -161,7 +163,7 @@ def main():
             for _ in range(dur):
                 n._frame_advance(b); pre.append(b)
                 x, p, ar = X(), int(R[0x6D]), int(R[0x74F])
-                if p >= pg + 2 or (ar != area0 and p >= pg):
+                if (GOAL_X and x >= GOAL_X) or (not GOAL_X and (p >= pg + 2 or (ar != area0 and p >= pg))):
                     route = {"drive": d["drive"], "frames": np.array(base_frames + pre, np.uint8)}
                     np.savez(dst, **route)
                     print(f"找到出口：第 {it} 次扩展，x {px}→{x} 页 {pg}→{p} 区域 {ar:#x}，"
