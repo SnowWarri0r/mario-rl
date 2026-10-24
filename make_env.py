@@ -884,7 +884,12 @@ def make_env_route():
     e.reset(); n = _nes_of(e)
     for a in d["drive"]:
         e.step(int(a))
-    for b in d["frames"]:
+    frames = d["frames"]
+    # MARIO_ROUTE_RANDCUT=1 → 在整条路线上随机挑一个截断点开局（每个子进程不同）：沿示范均匀撒起点，
+    # 一个策略同时练全关每一段（Salimans & Chen 2018 从示范状态开局的思路；不做由后往前的课程）。
+    if os.environ.get("MARIO_ROUTE_RANDCUT") == "1":
+        frames = frames[:int(np.random.default_rng().integers(0, len(frames) + 1))]
+    for b in frames:
         n._frame_advance(int(b))
     for _ in range(int(np.random.default_rng().integers(0, int(os.environ.get("MARIO_ROUTE_NOOP", "0")) + 1))):
         n._frame_advance(0)
@@ -899,6 +904,13 @@ def make_env_route():
         w = StickyActions(w)
     w = SkipFrame(w, k=SKIP_FRAMES); w = GrayResize(w, size=84); w = FrameStack(w, prime_on_reset=True)
     return w
+
+
+def make_env_route_mix():
+    """MARIO_ROUTE_P 的概率按路线开局（make_env_route，可配 MARIO_ROUTE_RANDCUT），其余从关卡起点正常开局。"""
+    if np.random.default_rng().random() < float(os.environ.get("MARIO_ROUTE_P", "0.8")):
+        return make_env_route()
+    return make_env(stages=[os.environ["MARIO_STAGE"]])
 
 
 def make_env_shaped():

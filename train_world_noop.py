@@ -17,7 +17,7 @@ from stable_baselines3.common.utils import get_schedule_fn
 from make_env import (make_env_world1, make_env_world2_land, make_env_world3,
                       make_env_stage21, make_env_stage13, make_env_stage12,
                       make_env_stage23, make_env_single, make_env_multi,
-                      make_env_maze, make_env_shaped, make_env_44bottom, make_env_single_fish, make_env_22dodge, make_env_boss, make_env_boss_mix, make_env_route, NOOP_JITTER)
+                      make_env_maze, make_env_shaped, make_env_44bottom, make_env_single_fish, make_env_22dodge, make_env_boss, make_env_boss_mix, make_env_route, make_env_route_mix, NOOP_JITTER)
 
 DEVICE = os.environ.get("MARIO_DEVICE", "cpu")
 OUT = os.environ.get("MARIO_OUT", "mario_w1noop")
@@ -51,6 +51,7 @@ def main():
                "boss": make_env_boss,             # 城堡库巴段专练：配 MARIO_STAGE / MARIO_BOSS_DRIVER / MARIO_BOSS_X
                "bossmix": make_env_boss_mix,      # 库巴专练 + 全关混训（MARIO_BOSS_P）
                "route": make_env_route,           # 按录好的路线开局（MARIO_ROUTE），8-4 分房间训练
+               "routemix": make_env_route_mix,    # 路线开局（可沿路线随机截断）+ 关卡起点混训（MARIO_ROUTE_P）
                "shaped": make_env_shaped}[world]  # 配 MARIO_STAGE + MARIO_CKPTS，死一次重罚
     assert NOOP_JITTER, "这个脚本的意义就在抖动，记得 MARIO_NOOP=30"
     venv = make_vec_env(factory, n_envs=n_envs, vec_env_cls=SubprocVecEnv)
