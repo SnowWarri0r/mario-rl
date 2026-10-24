@@ -888,7 +888,17 @@ def make_env_route():
     # MARIO_ROUTE_RANDCUT=1 → 在整条路线上随机挑一个截断点开局（每个子进程不同）：沿示范均匀撒起点，
     # 一个策略同时练全关每一段（Salimans & Chen 2018 从示范状态开局的思路；不做由后往前的课程）。
     if os.environ.get("MARIO_ROUTE_RANDCUT") == "1":
-        frames = frames[:int(np.random.default_rng().integers(0, len(frames) + 1))]
+        # 截断点不能落在路线最后 120 帧：那里已经碰到斧头，存档恢复后立刻进结局动画，
+        # reset 一直循环、整个向量环境被拖住（IMPALA 臂实测 3 fps，一个子进程占满一核）。
+        rr = np.random.default_rng()
+        # MARIO_ROUTE_FOCUS=p → 以 p 的概率把截断点放在某次钻管道之前 10-240 帧（路线 npz 的 warps 字段，
+        # 记录每次传送发生在第几帧）。依据：沿路线均匀撒点训 900 万步，库巴段和水下段都能打通了，
+        # 但前三个房间都卡在"站上管道按下"这一下——均匀撒点时这几帧只占全程很小一部分。
+        if "warps" in d and rr.random() < float(os.environ.get("MARIO_ROUTE_FOCUS", "0")):
+            w = int(rr.choice(d["warps"][:4]))
+            frames = frames[:max(0, w - int(rr.integers(10, 241)))]
+        else:
+            frames = frames[:int(rr.integers(0, max(1, len(frames) - 120)))]
     for b in frames:
         n._frame_advance(int(b))
     for _ in range(int(np.random.default_rng().integers(0, int(os.environ.get("MARIO_ROUTE_NOOP", "0")) + 1))):
