@@ -183,7 +183,7 @@ class LoopGuard(gym.Wrapper):
         o, info = self.env.reset(**kw)
         r = _nes_of(self).ram
         self._lc, self._pg, self._ok = int(r[0x745]), int(r[0x6D]), int(r[0x6D9])
-        self._x = self._pg * 256 + int(r[0x86]); self._area = int(r[0x750])
+        self._x = self._pg * 256 + int(r[0x86]); self._area = int(r[0x74F]); self._exempted = False
         return o, info
 
     def step(self, a):
@@ -193,14 +193,16 @@ class LoopGuard(gym.Wrapper):
         x = pg * 256 + int(r[0x86])
         # 往回传送也算判错：8-4 有几根管道把人送回关卡开头（实测 x≈822 的管道 → x≈312）。不拦的话，
         # 钻回去再走一遍能反复吃 x 奖励（gym 对大跳变记 0、但往回走完那段重新涨），策略学成刷分循环。
-        # 只在同一区域（AreaPointer $0750 不变）里判：换区域时 x 坐标系本来就会重置。
-        area = int(r[0x750])
+        # 只在同一区域（AreaAddrsLOffset $074F 不变）里判：换区域时 x 坐标系本来就会重置。
+        # ⚠️ 不能用 AreaPointer $0750：那是管道目的地，敌人加载器读到指针物体就会改它，并不代表换了区域。
+        area = int(r[0x74F])
         wrong = pg <= self._pg - 3 or npass > ok or (x < self._x - 200 and area == self._area)
         # 8-4 例外：第 6 页的循环检查在马里奥站上正确管道之前必然触发（全体后退 4 页、画面不变），
         # 之后站在"同一根"管道上按下才会去第 7 页（smbdis.asm ProcLoopCommand / HandlePipeEntry，实测确认）。
         # 判据：管道目的地 EntrancePage($0751) 还在当前页之后，就不算走错。
-        if wrong and int(r[0x75F]) == 7 and int(r[0x751]) > pg and npass <= ok:
-            wrong = False
+        # 每回合只放过一次：第二房间起管道在循环前就够得着，放过多次会学成"反复循环、反复吃同一段 x 奖励"（实测奖励涨到 6.9k）。
+        if wrong and int(r[0x75F]) == 7 and int(r[0x751]) > pg and npass <= ok and not self._exempted:
+            wrong = False; self._exempted = True
         if pg >= self._pg + 2 and not term:              # 一帧内往前跳了 ≥2 页 = 钻管道传送（8-4 只能这样过检查页）
             rew += self.bonus
             info = dict(info); info["warp"] = True
