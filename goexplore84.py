@@ -20,8 +20,11 @@ DBG = [0, 0]
 
 def try_room2(n, R, X, pre, pg):
     """站在 x≈2384-2420 地面上：返回成功的完整前缀（pre + 脚本帧），失败返回 None（调用方负责恢复状态）。
-    楼层（马里奥站立时的 Y）：地面 176；第 7 行的隐藏砖 / 实心砖顶 80；立在砖上的 2 格管道顶 48。
-    步骤：挪到隐藏砖正下方 x≈2400 原地跳顶出砖 → 退到 x≈2380 跳上砖（Y=80）→ 从砖上跳上管道顶（Y=48）
+    楼层（马里奥站立时的 Y = 砖顶像素 − 16）：地面 176（第 12 行顶 192）；第 7 行隐藏砖 / 实心砖顶 112 → 96；
+    立在砖上的 2 格管道（第 5-6 行）顶 80 → 64。第一版猜成 80/48，日志里上砖后永远是地面 176，没有一次符合。
+    ⚠️ 实测（逐个 x 原地跳、看金币数和头顶碰撞高度）：隐藏砖在马里奥 x 2372-2388 处顶得出来，不是解码给的 2400；
+    楼层改成"落地且比上一层高"来判，不再写死 Y。
+    步骤：挪到隐藏砖正下方 x≈2380 原地跳顶出砖 → 退到 x≈2380 跳上砖（Y=80）→ 从砖上跳上管道顶（Y=48）
     → 在管道顶挪进入口窗口 2436-2444 → 按下。中间等待帧数 wait 用来错开跳来跳去的飞龟。"""
     def dead():
         return int(R[0x0E]) == 0x0B or int(R[0xB5]) > 1
@@ -47,25 +50,26 @@ def try_room2(n, R, X, pre, pg):
                         return False
                 return False
             ok = all(adv(0) for _ in range(wait))
-            ok = ok and goto(2400, 2, 176)
+            ok = ok and goto(2380, 2, 176)
             if not ok: continue
             for _ in range(h1):
                 ok = ok and adv(0x01)
             for _ in range(40):
                 if not ok or (ground() and Y() == 176): break
                 ok = adv(0)
-            ok = ok and goto(2378, 3, 176)
+            ok = ok and goto(2356, 3, 176)
             if not ok: continue
             for _ in range(h2):
                 ok = ok and adv(0x81)
             for _ in range(50):
                 if not ok or ground(): break
-                ok = adv(0x80 if X() < 2398 else (0x40 if X() > 2408 else 0))
-            if DBG[0] < 12 and h2 == 12:
+                ok = adv(0x80 if X() < 2376 else (0x40 if X() > 2386 else 0))
+            if DBG[0] < 20:
                 DBG[0] += 1
                 ens = [(hex(int(R[0x16 + i])), int(R[0x6E + i]) * 256 + int(R[0x87 + i]), int(R[0xCF + i])) for i in range(5) if R[0x0F + i]]
                 print(f"  dbg 上砖后 wait={wait} h1={h1} h2={h2}: x={X()} y={Y()} 站地={ground()} 活={ok} 状态{int(R[0x0E]):#x} 敌人 {ens}", flush=True)
-            if not ok or not (ground() and Y() == 80): continue
+            if not ok or not (ground() and Y() < 160): continue
+            yb = Y()
             for _ in range(h3):
                 ok = ok and adv(0x81)
             for _ in range(50):
@@ -74,8 +78,9 @@ def try_room2(n, R, X, pre, pg):
             if DBG[1] < 30:
                 DBG[1] += 1
                 print(f"  dbg 上管道后 h3={h3}: x={X()} y={Y()} 站地={ground()} 活={ok}", flush=True)
-            if not ok or not (ground() and Y() == 48): continue
-            if not goto(2440, 4, 48, 60): continue
+            if not ok or not (ground() and Y() < yb - 20): continue
+            yp = Y()
+            if not goto(2440, 4, yp, 60): continue
             for _ in range(60):
                 n._frame_advance(0x20); seq.append(0x20)
                 if int(R[0x6D]) >= pg + 2:
@@ -108,11 +113,22 @@ def main():
     def dead():
         return int(R[0x0E]) == 0x0B or int(R[0xB5]) > 1
 
+    def near_enemies():
+        x = X()
+        return sum(1 for i in range(5) if R[0x0F + i]
+                   and -64 <= int(R[0x6E + i]) * 256 + int(R[0x87 + i]) - x <= 160)
+
+    def paratroopas():
+        return sum(1 for i in range(5) if R[0x0F + i] and int(R[0x16 + i]) == 0x0E
+                   and 2330 <= int(R[0x6E + i]) * 256 + int(R[0x87 + i]) <= 2520)
+
     def cell():
-        return (X() // 16, int(R[0xCE]) // 16, int(R[0x1D]) == 0)
+        # 格子带上"附近活着的敌人数"：踩掉第二房间那两只原地跳的飞龟是过隐藏砖的前提，
+        # 只按位置分格的话，踩没踩掉的状态落在同一格里，搜索看不出这是进展。
+        return (X() // 16, int(R[0xCE]) // 16, int(R[0x1D]) == 0, min(near_enemies(), 3), paratroopas())
 
     archive = {cell(): {"pre": [], "visits": 0}}
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(int(os.environ.get("MARIO_GE_SEED", "0")))
     t0 = time.time()
     for it in range(budget):
         keys = list(archive)
@@ -128,7 +144,9 @@ def main():
         px, pg = X(), int(R[0x6D])
         # 第二房间：x=2432 的悬空管道要先顶出 x=2400 的隐藏砖当台阶。随机按键几乎碰不到这个组合，
         # 所以站在隐藏砖附近的格子上额外试一套脚本：原地跳顶砖 → 跳上砖 → 跳上管道 → 挪进入口窗口按下。
-        if HOOK and 2384 <= X() <= 2420 and int(R[0x1D]) == 0:
+        if HOOK and 2300 <= X() <= 2420 and int(R[0x1D]) == 0 and paratroopas() == 0:
+            if not os.path.exists("dbg_room2_pre.npy"):
+                np.save("dbg_room2_pre.npy", np.array(base_frames + pre, np.uint8))
             res = try_room2(n, R, X, pre, pg)
             if res is not None:
                 np.savez(dst, drive=d["drive"], frames=np.array(base_frames + res, np.uint8))
@@ -159,7 +177,8 @@ def main():
                 archive[c] = {"pre": list(pre), "visits": archive.get(c, {"visits": 0})["visits"]}
         if it % 500 == 0:
             far = max(archive)[0] * 16
-            print(f"[{it}] 格子 {len(archive)}，最远 x≈{far}，{time.time()-t0:.0f}s", flush=True)
+            zero = [k for k in archive if k[3] == 0 and k[0] * 16 >= 2300]
+            print(f"[{it}] 格子 {len(archive)}，最远 x≈{far}，x≥2300 且附近无敌人的格子 {len(zero)}，{time.time()-t0:.0f}s", flush=True)
     print("预算用完，没找到出口")
 
 
