@@ -172,6 +172,7 @@ class LoopGuard(gym.Wrapper):
         次数 > 正确数 ⇒ 这一组已经注定回卷，立刻判错，不等第三次。
       - 4-4 / 8-4：错了当帧就回卷（马里奥页号一帧内掉 4）。
     判对：奖励 +LOOP_BONUS；判错：奖励 -LOOP_BONUS 并结束回合（terminated）。
+    钻管道往前传送（马里奥页号一帧内 +2 以上）也给 +LOOP_BONUS：gym 的 x 奖励对大跳变记 0，8-4 的正路全靠管道。
     结束回合而不是放它回卷：回卷后画面和起点几乎一样，"错在哪"的信号会被稀释掉。
     """
     def __init__(self, env, bonus=None):
@@ -182,20 +183,34 @@ class LoopGuard(gym.Wrapper):
         o, info = self.env.reset(**kw)
         r = _nes_of(self).ram
         self._lc, self._pg, self._ok = int(r[0x745]), int(r[0x6D]), int(r[0x6D9])
+        self._x = self._pg * 256 + int(r[0x86]); self._area = int(r[0x750])
         return o, info
 
     def step(self, a):
         o, rew, term, trunc, info = self.env.step(a)
         r = _nes_of(self).ram
         lc, pg, npass, ok = int(r[0x745]), int(r[0x6D]), int(r[0x6DA]), int(r[0x6D9])
-        wrong = pg <= self._pg - 3 or npass > ok
+        x = pg * 256 + int(r[0x86])
+        # 往回传送也算判错：8-4 有几根管道把人送回关卡开头（实测 x≈822 的管道 → x≈312）。不拦的话，
+        # 钻回去再走一遍能反复吃 x 奖励（gym 对大跳变记 0、但往回走完那段重新涨），策略学成刷分循环。
+        # 只在同一区域（AreaPointer $0750 不变）里判：换区域时 x 坐标系本来就会重置。
+        area = int(r[0x750])
+        wrong = pg <= self._pg - 3 or npass > ok or (x < self._x - 200 and area == self._area)
+        # 8-4 例外：第 6 页的循环检查在马里奥站上正确管道之前必然触发（全体后退 4 页、画面不变），
+        # 之后站在"同一根"管道上按下才会去第 7 页（smbdis.asm ProcLoopCommand / HandlePipeEntry，实测确认）。
+        # 判据：管道目的地 EntrancePage($0751) 还在当前页之后，就不算走错。
+        if wrong and int(r[0x75F]) == 7 and int(r[0x751]) > pg and npass <= ok:
+            wrong = False
+        if pg >= self._pg + 2 and not term:              # 一帧内往前跳了 ≥2 页 = 钻管道传送（8-4 只能这样过检查页）
+            rew += self.bonus
+            info = dict(info); info["warp"] = True
         if self._lc and not lc and not wrong:
             rew += self.bonus
             info = dict(info); info["loop_ok"] = True
         if wrong and not term:
             rew -= self.bonus; term = True
             info = dict(info); info["loop_wrong"] = True
-        self._lc, self._pg, self._ok = lc, pg, ok
+        self._lc, self._pg, self._ok, self._x, self._area = lc, pg, ok, x, area
         return o, rew, term, trunc, info
 
 
@@ -853,6 +868,35 @@ def make_env_boss_mix():
     if np.random.default_rng().random() < float(os.environ.get("MARIO_BOSS_P", "0.5")):
         return make_env_boss()
     return make_env(stages=[os.environ["MARIO_STAGE"]])
+
+
+def make_env_route():
+    """按录好的路线开局：MARIO_ROUTE=<npz>（drive=智能体动作序列、frames=逐帧手柄字节），重放后 _backup() 当 reset 存档点。
+    MARIO_ROUTE_NOOP=k → 存档前再随机空按 0-k 帧（每个子进程不同），打散存档点。用于 8-4 分房间训练。"""
+    stage = os.environ["MARIO_STAGE"]
+    d = np.load(os.environ["MARIO_ROUTE"])
+    e = MarioBase(stages=[stage])
+    if LOOPGUARD:
+        e = LoopGuard(e)
+    e = SkipFrame(e, k=SKIP_FRAMES); e = GrayResize(e, size=84); e = FrameStack(e)
+    e.reset(); n = _nes_of(e)
+    for a in d["drive"]:
+        e.step(int(a))
+    for b in d["frames"]:
+        n._frame_advance(int(b))
+    for _ in range(int(np.random.default_rng().integers(0, int(os.environ.get("MARIO_ROUTE_NOOP", "0")) + 1))):
+        n._frame_advance(0)
+    n._backup()
+    base = e
+    while hasattr(base, "env"):
+        base = base.env
+    w = LoopGuard(base) if LOOPGUARD else base
+    if RNG_POOL:
+        w = RandomizeRNG(w)
+    if STICKY_P:
+        w = StickyActions(w)
+    w = SkipFrame(w, k=SKIP_FRAMES); w = GrayResize(w, size=84); w = FrameStack(w, prime_on_reset=True)
+    return w
 
 
 def make_env_shaped():

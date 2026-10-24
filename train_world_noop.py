@@ -17,12 +17,14 @@ from stable_baselines3.common.utils import get_schedule_fn
 from make_env import (make_env_world1, make_env_world2_land, make_env_world3,
                       make_env_stage21, make_env_stage13, make_env_stage12,
                       make_env_stage23, make_env_single, make_env_multi,
-                      make_env_maze, make_env_shaped, make_env_44bottom, make_env_single_fish, make_env_22dodge, make_env_boss, make_env_boss_mix, NOOP_JITTER)
+                      make_env_maze, make_env_shaped, make_env_44bottom, make_env_single_fish, make_env_22dodge, make_env_boss, make_env_boss_mix, make_env_route, NOOP_JITTER)
 
 DEVICE = os.environ.get("MARIO_DEVICE", "cpu")
 OUT = os.environ.get("MARIO_OUT", "mario_w1noop")
 BASE_MODEL = os.environ.get("MARIO_BASE", "mario_w1c_final.zip")
-BASE_VECN = os.environ.get("MARIO_BASE_VECN", "vecnormalize_w1c.pkl")
+BASE_VECN = os.environ.get("MARIO_BASE_VECN", "fresh" if BASE_MODEL == "scratch" else "vecnormalize_w1c.pkl")
+# ⚠️ 从头训绝不能落到默认值 vecnormalize_w1c.pkl：VecNormalize.load 会把 pickle 里存的**动作空间**一起带回来，
+#    8-4 两臂（MARIO_COMPLEX=1，环境 12 动作）因此悄悄训成了 7 动作——没有 down，钻管道根本不可能（2026-10-19 踩过）。
 # 2-2 那套手术的三个开关：熵归零（熵奖励会持续溶解确定性解）、低 lr、密存档（刀锋解只能靠模型选择抓）
 ENT = os.environ.get("MARIO_ENT")
 LR = float(os.environ.get("MARIO_LR", "2.5e-4"))
@@ -48,6 +50,7 @@ def main():
                "dodge22": make_env_22dodge,       # 2-2 躲鱼专练：鱼群路段存档开局 + 每局换随机数
                "boss": make_env_boss,             # 城堡库巴段专练：配 MARIO_STAGE / MARIO_BOSS_DRIVER / MARIO_BOSS_X
                "bossmix": make_env_boss_mix,      # 库巴专练 + 全关混训（MARIO_BOSS_P）
+               "route": make_env_route,           # 按录好的路线开局（MARIO_ROUTE），8-4 分房间训练
                "shaped": make_env_shaped}[world]  # 配 MARIO_STAGE + MARIO_CKPTS，死一次重罚
     assert NOOP_JITTER, "这个脚本的意义就在抖动，记得 MARIO_NOOP=30"
     venv = make_vec_env(factory, n_envs=n_envs, vec_env_cls=SubprocVecEnv)
@@ -56,12 +59,18 @@ def main():
     # 这个名字我已经猜错五次。原来「文件不存在就新建一个」是静默的，后果不是报错而是**悄悄跑歪**：
     # warm-start 来的价值头是在旧的 reward 归一化尺度上拟合的，配一个全新的 running stats
     # 等于价值头一开始就读错刻度。所以显式指定了却找不到＝直接炸，只有不指定才允许新建。
-    if os.environ.get("MARIO_BASE_VECN"):
+    if BASE_VECN == "fresh":
+        # 热启动的档没存奖励归一化统计（例如训练中途被停的检查点）：显式要一份新的，
+        # 别让默认值 vecnormalize_w1c.pkl 被悄悄加载进来（那是 W1 的奖励尺度）。
+        venv = VecNormalize(venv, norm_obs=False, norm_reward=True, clip_reward=10.0)
+    elif os.environ.get("MARIO_BASE_VECN"):
         assert os.path.exists(BASE_VECN), (
             f"指定了 MARIO_BASE_VECN={BASE_VECN} 但文件不存在。"
             f"命名是 vecnormalize_<MARIO_OUT>.pkl，现有的："
             f"{sorted(f for f in os.listdir('.') if f.startswith('vecnormalize'))}")
-    if os.path.exists(BASE_VECN):
+    if BASE_VECN == "fresh":
+        pass
+    elif os.path.exists(BASE_VECN):
         venv = VecNormalize.load(BASE_VECN, venv)
         venv.training = True; venv.norm_reward = True
     else:
@@ -73,7 +82,7 @@ def main():
         from stable_baselines3.common.utils import get_schedule_fn as _g  # noqa: F401
         from wide_cnn import WideNatureCNN
         from impala_cnn import ImpalaCNN
-        assert not os.environ.get("MARIO_BASE_VECN"), "从头训不该带旧的奖励归一化统计"
+        assert BASE_VECN == "fresh", "从头训不该带旧的奖励归一化统计"
         # MARIO_NET=impala → IMPALA 残差骨干（带 GroupNorm，见 impala_cnn.py），MARIO_SCALE 定通道（16 = 16/32/64/64）。
         # 依据：Cobbe 等 Procgen（2019）里 IMPALA-CNN 对没见过的关卡泛化明显好于 Nature-CNN；
         # 2-2 的短板正是"没见过的鱼群"。
@@ -95,6 +104,7 @@ def main():
     # 踩过：从「熵归零手术档」(lr=1e-5) warm-start 去学 World 4，banner 打印 lr 0.00025，
     # 实际 6M 步全程 1e-5，慢了 25 倍。ent_coef 是普通属性所以赋值有效，lr 不是——
     # 一个坑修了一半比没修更骗人，所以下面连 schedule 一起换掉，并当场断言。
+    assert model.action_space == venv.action_space, f"动作空间不一致：模型 {model.action_space} vs 环境 {venv.action_space}"
     model.learning_rate = LR
     model.lr_schedule = get_schedule_fn(LR)
     assert model.lr_schedule(1.0) == LR, "lr 没生效"
