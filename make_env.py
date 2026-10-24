@@ -64,6 +64,10 @@ REJITTER_ON_DEATH = os.environ.get("MARIO_REJITTER_ON_DEATH") == "1"
 # 奇数行留给评测。为什么：单关环境每次进关随机数都一样，2-2 老师背下了那一套鱼群
 # （diag_22_rng.py：换随机数 66% → 41-47%）。连打进关时随机数取决于开机后总帧数，所以训练要见多套。
 RNG_POOL = os.environ.get("MARIO_RNG_POOL")
+# MARIO_LOOPGUARD=1 → 迷宫关（4-4 / 7-4 / 8-4）按游戏自己的判定给奖励：检查对了 +MARIO_LOOP_BONUS，
+# 检查错了立刻结束回合并扣同样的分（见 LoopGuard）。
+LOOPGUARD = os.environ.get("MARIO_LOOPGUARD") == "1"
+LOOP_BONUS = float(os.environ.get("MARIO_LOOP_BONUS", "100"))
 
 
 # --- 积木 A：把老的 gym 马里奥，翻译成 sb3 要的 gymnasium 接口 ---
@@ -158,6 +162,41 @@ class NoopReset(gym.Wrapper):
                 o, info = self.env.reset(**kw)
                 break
         return o, info
+
+
+class LoopGuard(gym.Wrapper):
+    """迷宫关的"走对路"信号，直接读游戏判定（smbdis.asm ProcLoopCommand）。挂在 MarioBase 上、跳帧之下，逐帧看。
+
+    每次检查发生在 LoopCommand($0745) 从非零变零的那一帧：
+      - 7-4（世界 7，三次一组）：次数计数器 $06DA 加一；对了正确计数器 $06D9 也加一。
+        次数 > 正确数 ⇒ 这一组已经注定回卷，立刻判错，不等第三次。
+      - 4-4 / 8-4：错了当帧就回卷（马里奥页号一帧内掉 4）。
+    判对：奖励 +LOOP_BONUS；判错：奖励 -LOOP_BONUS 并结束回合（terminated）。
+    结束回合而不是放它回卷：回卷后画面和起点几乎一样，"错在哪"的信号会被稀释掉。
+    """
+    def __init__(self, env, bonus=None):
+        super().__init__(env)
+        self.bonus = LOOP_BONUS if bonus is None else bonus
+
+    def reset(self, **kw):
+        o, info = self.env.reset(**kw)
+        r = _nes_of(self).ram
+        self._lc, self._pg, self._ok = int(r[0x745]), int(r[0x6D]), int(r[0x6D9])
+        return o, info
+
+    def step(self, a):
+        o, rew, term, trunc, info = self.env.step(a)
+        r = _nes_of(self).ram
+        lc, pg, npass, ok = int(r[0x745]), int(r[0x6D]), int(r[0x6DA]), int(r[0x6D9])
+        wrong = pg <= self._pg - 3 or npass > ok
+        if self._lc and not lc and not wrong:
+            rew += self.bonus
+            info = dict(info); info["loop_ok"] = True
+        if wrong and not term:
+            rew -= self.bonus; term = True
+            info = dict(info); info["loop_wrong"] = True
+        self._lc, self._pg, self._ok = lc, pg, ok
+        return o, rew, term, trunc, info
 
 
 class RandomizeRNG(gym.Wrapper):
@@ -360,6 +399,8 @@ def make_env(stages=None, skip=None, crop=None, noop=None, exact=None):
     在 import 之后再设完全无效。踩过——`diag_progress.py` 以为自己在枚举 31 个确切相位，
     实际每局是在 [0,k] 里随机抽，既不可复现、相位还重复，扫出来的整张表全废。"""
     env = MarioBase(stages=stages)
+    if LOOPGUARD:
+        env = LoopGuard(env)                 # 逐帧看迷宫检查，要在跳帧和空按之下
     k = NOOP_JITTER if noop is None else noop
     if k:
         env = NoopReset(env, max_noop=k, exact=exact)   # 单帧粒度地抖相位，要放在跳帧之前
@@ -742,6 +783,76 @@ def make_env_44bottom():
 
 
 
+
+
+def make_env_boss():
+    """城堡关库巴段专练：用现成策略开到 x≥MARIO_BOSS_X 存档，之后每回合从这里开局（单关路线见 make_env_44bottom）。
+
+    7-4（LoopGuard 训练 200 万步起）六个迷宫检查全对，失败几乎都死在 x≈3230 的库巴；从关卡起点训，
+    每回合先花 ~3000 像素走迷宫，库巴只占很小一部分样本。
+    reset 时每回合换一套游戏随机数（MARIO_RNG_POOL；库巴喷火、跳跃读随机数），并随机空按 0-MARIO_NOOP 帧。
+    MARIO_BOSS_DRIVER=开车模型、MARIO_STAGE=关卡。开不到就换相位重试，最多 8 次。
+    """
+    import torch as th
+    from stable_baselines3 import PPO
+    import wide_cnn, impala_cnn  # noqa: F401
+    th.set_num_threads(1)
+    stage = os.environ["MARIO_STAGE"]; x0 = int(os.environ.get("MARIO_BOSS_X", "2900"))
+    # 每个子进程的存档点要不一样：库巴的位置/动作节奏取决于马里奥何时到达。第一版所有环境都用同一个
+    # 开局相位开车，存档里的库巴状态只有一种，专练后库巴段胜率 15/40 → 30/40，全关通关却没涨（16 → 7-11/31）。
+    # 这里每个环境随机开局空按 0-120 帧、存档 x 再抖 ±MARIO_BOSS_XJ。
+    rs = np.random.default_rng()
+    pre = int(rs.integers(0, 121)); x0 += int(rs.integers(-int(os.environ.get("MARIO_BOSS_XJ", "150")),
+                                                           int(os.environ.get("MARIO_BOSS_XJ", "150")) + 1))
+    m = PPO.load(os.environ["MARIO_BOSS_DRIVER"], device="cpu")
+    for k in range(8):
+        e = MarioBase(stages=[stage])
+        if LOOPGUARD:
+            e = LoopGuard(e)
+        e = SkipFrame(e, k=SKIP_FRAMES); e = GrayResize(e, size=84); e = FrameStack(e)
+        o, _ = e.reset()
+        for _ in range((pre + k * 7) // SKIP_FRAMES):
+            o, *_ = e.step(0)
+        n = _nes_of(e)
+        ok = False
+        for _ in range(3000):
+            if int(n.ram[0x6D]) * 256 + int(n.ram[0x86]) >= x0:
+                ok = True; break
+            ot, _ = m.policy.obs_to_tensor(o)
+            with th.no_grad():
+                a = int(m.policy.get_distribution(ot).distribution.probs.argmax())
+            o, r, term, trunc, info = e.step(a)
+            if term or trunc:
+                break
+        if ok:
+            break
+        e.close()
+    else:
+        raise RuntimeError(f"开不到 x={x0}")
+    n._backup()
+    # 存档已在底层 NES 上；重新叠一套 wrapper（reset = 恢复存档），帧栈在 reset 后会 prime
+    env = e
+    while hasattr(env, "env"):
+        env = env.env
+    base = env                                   # MarioBase（LoopGuard 之下）
+    w = LoopGuard(base) if LOOPGUARD else base
+    if NOOP_JITTER:
+        w = NoopReset(w, max_noop=NOOP_JITTER)
+    if RNG_POOL:
+        w = RandomizeRNG(w)
+    if STICKY_P:
+        w = StickyActions(w)
+    w = SkipFrame(w, k=SKIP_FRAMES); w = GrayResize(w, size=84); w = FrameStack(w)
+    return w
+
+
+def make_env_boss_mix():
+    """库巴专练 + 全关混训：每个子进程以 MARIO_BOSS_P 的概率做库巴存档开局（make_env_boss），其余打全关。
+    为什么：只练库巴（mario_74boss2）把迷宫段忘了（全关死在 x≈425 / 1658），而按 x 拼两个网络（expert_74）
+    只有 ~40%——库巴段网络见到的到达状态是迷宫段网络开出来的，和它自己专练时不一样。混训让一个网络两段都练。"""
+    if np.random.default_rng().random() < float(os.environ.get("MARIO_BOSS_P", "0.5")):
+        return make_env_boss()
+    return make_env(stages=[os.environ["MARIO_STAGE"]])
 
 
 def make_env_shaped():
